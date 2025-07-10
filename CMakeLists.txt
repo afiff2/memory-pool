@@ -23,6 +23,13 @@ file(GLOB SRC_FILES
 # 构建静态库
 add_library(memory_pool STATIC ${SRC_FILES})
 
-# 构建测试程序并链接库
-add_executable(PageCacheTest ${PROJECT_SOURCE_DIR}/test/PageCache_test.cpp)
-target_link_libraries(PageCacheTest PRIVATE memory_pool)
+# 查找线程库
+find_package(Threads REQUIRED)
+
+# 构建测试程序并分别链接库
+add_executable(PageCacheTest1 ${PROJECT_SOURCE_DIR}/test/PageCache_test1.cpp)
+add_executable(PageCacheTest2 ${PROJECT_SOURCE_DIR}/test/PageCache_test2.cpp)
+
+# 分别链接库
+target_link_libraries(PageCacheTest1 PRIVATE memory_pool)
+target_link_libraries(PageCacheTest2 PRIVATE memory_pool Threads::Threads)
