@@ -10,12 +10,14 @@ PageCache &PageCache::getInstance()
     return instance;
 }
 
-PageCache::~PageCache() {
+PageCache::~PageCache()
+{
     std::lock_guard<std::mutex> lock(mutex_);
     // 释放所有 span（包括空闲和正在用的，startMap_ 包含了全量）
-    for (auto &p : spanStartMap_) {
-        Span* s      = p.second;
-        auto  size   = s->numPages * PAGE_SIZE;
+    for (auto &p : spanStartMap_)
+    {
+        Span *s = p.second;
+        auto size = s->numPages * PAGE_SIZE;
         munmap(s->pageAddr, size);
         delete s;
     }
@@ -28,7 +30,8 @@ PageCache::~PageCache() {
 // 分配
 void *PageCache::allocateSpan(std::size_t numPages)
 {
-    if (numPages == 0) return nullptr;
+    if (numPages == 0)
+        return nullptr;
     std::lock_guard<std::mutex> lock(mutex_);
 
     // 1先在空闲链表中找 ≥numPages 的块
@@ -47,6 +50,7 @@ void *PageCache::allocateSpan(std::size_t numPages)
             tail->pageAddr = static_cast<char *>(span->pageAddr) + numPages * PAGE_SIZE;
             tail->numPages = span->numPages - numPages;
             tail->next = nullptr;
+            tail->prev = nullptr;
 
             pushToFreeList(tail); // 尾巴回收
             spanStartMap_[tail->pageAddr] = tail;
@@ -64,7 +68,7 @@ void *PageCache::allocateSpan(std::size_t numPages)
     if (!mem)
         return nullptr;
 
-    Span *span = new Span{mem, numPages, nullptr};
+    Span *span = new Span{mem, numPages, nullptr, nullptr};
     spanStartMap_[span->pageAddr] = span;
     spanEndMap_[endAddr(span)] = span;
     return mem;
@@ -132,30 +136,30 @@ bool PageCache::detachFromFreeList(Span *s)
     if (!head)
         return false;
 
-    if (head == s)
-    { // 正在头部
+    if (head == s) { // 头部
         head = s->next;
+    } else if (s->prev) { // 非头部
+        s->prev->next = s->next;
+    } else { // 不存在
+        return false;
     }
-    else
-    { // 在中间
-        Span *prev = head;
-        while (prev->next && prev->next != s)
-            prev = prev->next;
-        if (prev->next != s)
-            return false; // 不在链表
-        prev->next = s->next;
+
+    if (s->next){
+        s->next->prev = s->prev;
     }
-    if (!head)
-        freeSpans_.erase(listIt); // 链表清空
-    s->next = nullptr;
+    if (!head) freeSpans_.erase(listIt); // 链表清空
+    s->next = s->prev = nullptr;
     return true;
 }
 
 // 头插入空闲链表
 void PageCache::pushToFreeList(Span *s)
 {
-    s->next = freeSpans_[s->numPages];
-    freeSpans_[s->numPages] = s;
+    Span*& head = freeSpans_[s->numPages];
+    s->next = head;
+    if (head) head->prev = s;
+    head = s;
+    s->prev = nullptr;
 }
 
 // 向 os 请求物理页

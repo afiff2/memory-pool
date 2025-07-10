@@ -1,50 +1,53 @@
 #pragma once
-#include <unordered_map>
+#include <cstddef>
 #include <map>
 #include <mutex>
-#include <cstddef>
 #include <unistd.h>
+#include <unordered_map>
 
-//ToDo: 回收回 OS（munmap）
-//每次拆分都 new Span，每次合并都 delete Span，在高并发场景下可能成为瓶颈。
+// ToDo: 回收回 OS（munmap）
+// 每次拆分都 new Span，每次合并都 delete Span，在高并发场景下可能成为瓶颈。
 
-namespace memory_pool {
+namespace memory_pool
+{
 
-class PageCache {
-public:
-    static inline std::size_t PAGE_SIZE = sysconf(_SC_PAGESIZE);   // 系统页大小
+class PageCache
+{
+  public:
+    static inline std::size_t PAGE_SIZE = sysconf(_SC_PAGESIZE); // 系统页大小
 
-    static PageCache& getInstance();
+    static PageCache &getInstance();
 
-    void* allocateSpan(std::size_t numPages);   // 分配 ≥numPages 页
-    void  deallocateSpan(void* ptr);            // 归还整段内存
+    void *allocateSpan(std::size_t numPages); // 分配 ≥numPages 页
+    void deallocateSpan(void *ptr);           // 归还整段内存
 
     ~PageCache();
 
-private:
+  private:
     PageCache() = default;
-    PageCache(const PageCache&)            = delete;
-    PageCache& operator=(const PageCache&) = delete;
+    PageCache(const PageCache &) = delete;
+    PageCache &operator=(const PageCache &) = delete;
 
-    struct Span {
-        void*          pageAddr;           // 起始地址
-        std::size_t    numPages;           // 页数
-        Span*          next;               // 空闲链表指针
+    struct Span
+    {
+        void *pageAddr;       // 起始地址
+        std::size_t numPages; // 页数
+        Span *prev;           // Modified: 新增前驱指针
+        Span *next;           // 空闲链表指针
     };
 
-    // ---------- 内部工具 ----------
-    void* systemAlloc(std::size_t numPages);             // 向 OS mmap
-    void* endAddr(const Span* s) const {                 // span 尾后一字节
-        return static_cast<char*>(s->pageAddr) + s->numPages * PAGE_SIZE;
+    void *systemAlloc(std::size_t numPages);
+    void *endAddr(const Span *s) const
+    { // span 尾后一字节
+        return static_cast<char *>(s->pageAddr) + s->numPages * PAGE_SIZE;
     }
-    bool detachFromFreeList(Span* s);                    // 摘链表
-    void pushToFreeList(Span* s);                        // 头插链表
+    bool detachFromFreeList(Span *s); // 摘链表
+    void pushToFreeList(Span *s);     // 头插链表
 
-    // ---------- 成员 ----------
-    std::map<std::size_t, Span*>     freeSpans_;   // key=页数，value=链表头
-    std::unordered_map<void*, Span*> spanStartMap_;// 起始地址 → Span*
-    std::unordered_map<void*, Span*> spanEndMap_;  // 结束地址 → Span*
-    std::mutex                       mutex_;
+    std::map<std::size_t, Span *> freeSpans_;         // key=页数，value=链表头
+    std::unordered_map<void *, Span *> spanStartMap_; // 起始地址 → Span*
+    std::unordered_map<void *, Span *> spanEndMap_;   // 结束地址 → Span*
+    std::mutex mutex_;
 };
 
 } // namespace memory_pool
