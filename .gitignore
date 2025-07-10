@@ -1,1 +1,7 @@
 .clang-format
+
+/build/
+*.o
+*.a
+*.so
+*.dll
