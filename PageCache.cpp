@@ -13,18 +13,20 @@ PageCache &PageCache::getInstance()
 PageCache::~PageCache()
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    // 释放所有 span（包括空闲和正在用的，startMap_ 包含了全量）
+    // 释放所有 span（包括空闲和正在用的，startMap_ 包含了全量）（但是不包含SpanPool）
     for (auto &p : spanStartMap_)
     {
         Span *s = p.second;
         auto size = s->numPages * PAGE_SIZE;
         munmap(s->pageAddr, size);
-        delete s;
+        SpanPool::put(s);
     }
     // 清空所有容器
     freeSpans_.clear();
     spanStartMap_.clear();
     spanEndMap_.clear();
+    // 删除池中所有 Span
+    SpanPool::clear();
 }
 
 // 分配
@@ -46,7 +48,7 @@ void *PageCache::allocateSpan(std::size_t numPages)
         {
             spanEndMap_.erase(endAddr(span)); // 原尾失效
 
-            Span *tail = new Span;
+            Span *tail = SpanPool::get();
             tail->pageAddr = static_cast<char *>(span->pageAddr) + numPages * PAGE_SIZE;
             tail->numPages = span->numPages - numPages;
             tail->next = nullptr;
@@ -68,7 +70,12 @@ void *PageCache::allocateSpan(std::size_t numPages)
     if (!mem)
         return nullptr;
 
-    Span *span = new Span{mem, numPages, nullptr, nullptr};
+    Span* span = SpanPool::get();
+    span->pageAddr = mem;
+    span->numPages = numPages;
+    span->prev = nullptr;
+    span->next = nullptr;
+
     spanStartMap_[span->pageAddr] = span;
     spanEndMap_[endAddr(span)] = span;
     return mem;
@@ -99,7 +106,7 @@ void PageCache::deallocateSpan(void *ptr)
             spanEndMap_.erase(endAddr(span)); // old tail
             span->numPages += rightSpan->numPages;
             spanEndMap_[endAddr(span)] = span; // new tail
-            delete rightSpan;                  // 被并入，删掉元数据
+            SpanPool::put(rightSpan); // 被并入，删掉元数据
         }
     }
 
@@ -116,7 +123,7 @@ void PageCache::deallocateSpan(void *ptr)
 
             spanStartMap_.erase(span->pageAddr);
             spanEndMap_.erase(endAddr(span));
-            delete span;     // 被并入，删掉元数据
+            SpanPool::put(span); // 被并入，删掉元数据
             span = leftSpan; // 更新为合并后块
         }
     }
