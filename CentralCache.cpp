@@ -54,6 +54,16 @@ CentralCache::~CentralCache() {
     for (auto *tr : uniqueTrackers) {
         delete tr;
     }
+
+    //清理池子
+    for (size_t i = 0; i < NUM_CLASSES; ++i) {
+        SpanTracker* cur = spanTrackerPools_[i];
+        while (cur) {
+            SpanTracker* next = cur->next;
+            delete cur;
+            cur = next;
+        }
+    }
 }
 
 FetchResult CentralCache::fetchRange(size_t index, size_t maxBatch)
@@ -191,7 +201,7 @@ void CentralCache::updateSpanFreeCount(SpanTracker *tr, size_t freeCount, size_t
         spanPageMap_[index].erase(static_cast<char *>(spanBase) + p * PageCache::PAGE_SIZE);
 
     // 释放对应的SpanTracker
-    delete tr;
+    putSpanTrackerToPool(tr, index);
 
     PageCache::getInstance().deallocateSpan(spanBase);
 }
@@ -218,7 +228,7 @@ FetchResult CentralCache::fetchFromPageCache(size_t index)
     *reinterpret_cast<void **>(base + (blkNum - 1) * blkSize) = nullptr;
 
     // 添加一个新的tracker
-    SpanTracker* tr = new SpanTracker{};
+    SpanTracker* tr = getSpanTrackerFromPool(index);
     tr->spanAddr.store(span, std::memory_order_relaxed);
     tr->numPages.store(pages, std::memory_order_relaxed);
     tr->blockCount.store(blkNum, std::memory_order_relaxed);

@@ -15,6 +15,7 @@ struct SpanTracker
     std::atomic<void *> spanAddr{nullptr}; // 这段 span 的起始地址
     std::atomic<size_t> numPages{0};       // 这段 span 包含多少页
     std::atomic<size_t> blockCount{0};     // 这段 span 被划分成了多少个内存块
+    SpanTracker *next = nullptr;           // 用于微型SpanTracker池
 };
 
 class CentralCache
@@ -64,6 +65,23 @@ class CentralCache
     std::array<std::chrono::steady_clock::time_point, NUM_CLASSES> lastReturn_;
 
     std::array<std::unordered_map<void*, SpanTracker*>, NUM_CLASSES> spanPageMap_{};//记录页对应的SpanTracker(加锁对index执行，所以有index项)
+
+    // 微型spanTracker池,必须在index自旋锁内使用
+    std::array<SpanTracker *, NUM_CLASSES> spanTrackerPools_;
+    inline SpanTracker* getSpanTrackerFromPool(size_t index) {
+        SpanTracker* node = spanTrackerPools_[index];
+        if (node) {
+            spanTrackerPools_[index] = node->next;
+            node->next = nullptr;
+            return node;
+        }
+        return new SpanTracker(); // fallback 到堆分配
+    }
+
+    inline void putSpanTrackerToPool(SpanTracker* tr, size_t index) {
+        tr->next = spanTrackerPools_[index];
+        spanTrackerPools_[index] = tr;
+    }
 };
 
 } // namespace memory_pool
