@@ -15,7 +15,6 @@ struct SpanTracker
     std::atomic<void *> spanAddr{nullptr}; // 这段 span 的起始地址
     std::atomic<size_t> numPages{0};       // 这段 span 包含多少页
     std::atomic<size_t> blockCount{0};     // 这段 span 被划分成了多少个内存块
-    std::atomic<size_t> freeCount{0};      // 当前有多少个空闲的块
 };
 
 class CentralCache
@@ -37,7 +36,7 @@ class CentralCache
     void *fetchFromPageCache(size_t index);
 
     SpanTracker *getSpanTracker(void *block, size_t index);
-    void updateSpanFreeCount(SpanTracker *tracker, size_t newFree, size_t index);
+    void updateSpanFreeCount(SpanTracker *tracker, size_t freeCount, size_t index);
 
     bool shouldDelayReturn(size_t index, size_t currentCnt, std::chrono::steady_clock::time_point now) const;
 

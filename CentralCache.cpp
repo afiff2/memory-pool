@@ -40,6 +40,7 @@ CentralCache::CentralCache()
         t = now;
 }
 
+//不用还页，上层会全部释放
 CentralCache::~CentralCache() {
     // 收集所有唯一的 SpanTracker 指针
     std::unordered_set<SpanTracker*> uniqueTrackers;
@@ -72,10 +73,6 @@ void *CentralCache::fetchRange(size_t index)
     void *next = *reinterpret_cast<void **>(blk);
     centralFree_[index].head.store(next, std::memory_order_relaxed);
     *reinterpret_cast<void **>(blk) = nullptr;
-
-    // 查找并更新SpanTracker
-    if (auto *tr = getSpanTracker(blk, index))
-        tr->freeCount.fetch_sub(1, std::memory_order_relaxed);
 
     return blk;
 }
@@ -141,16 +138,15 @@ void CentralCache::performDelayedReturn(size_t index)
     }
 
     //更新每个span的空闲计数并检查是否可以归还
-    for (auto [tr, add] : counter)
-        updateSpanFreeCount(tr, add, index);
+    for (auto [tr, freeCount] : counter)
+        updateSpanFreeCount(tr, freeCount, index);
 }
 
-void CentralCache::updateSpanFreeCount(SpanTracker *tr, size_t add, size_t index)
+void CentralCache::updateSpanFreeCount(SpanTracker *tr, size_t freeCount, size_t index)
 {
     if (!tr)
         return;
-    size_t newFree = tr->freeCount.fetch_add(add, std::memory_order_relaxed) + add; //更新空闲块的数量
-    if (newFree != tr->blockCount.load(std::memory_order_relaxed)) //不是所有的块都空闲，暂时不归还
+    if (freeCount != tr->blockCount.load(std::memory_order_relaxed)) //不是所有的块都空闲，暂时不归还
         return;
 
     // 所有的块都空闲
@@ -215,7 +211,6 @@ void *CentralCache::fetchFromPageCache(size_t index)
     tr->spanAddr.store(span, std::memory_order_relaxed);
     tr->numPages.store(pages, std::memory_order_relaxed);
     tr->blockCount.store(blkNum, std::memory_order_relaxed);
-    tr->freeCount.store(blkNum - 1, std::memory_order_relaxed);
 
     for (size_t p = 0; p < pages; ++p)
         spanPageMap_[index][base + p * PageCache::PAGE_SIZE] = tr;//记录每一页的SpanTracker
