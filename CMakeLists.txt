@@ -30,8 +30,10 @@ find_package(Threads REQUIRED)
 add_executable(PageCacheTest1 ${PROJECT_SOURCE_DIR}/test/PageCache_test1.cpp)
 add_executable(PageCacheTest2 ${PROJECT_SOURCE_DIR}/test/PageCache_test2.cpp)
 add_executable(CentralCacheTest ${PROJECT_SOURCE_DIR}/test/CentralCache_test.cpp)
+add_executable(MemoryPoolBenchmark ${PROJECT_SOURCE_DIR}/test/memory_pool_benchmark.cpp)
 
 # 分别链接库
 target_link_libraries(PageCacheTest1 PRIVATE memory_pool)
 target_link_libraries(PageCacheTest2 PRIVATE memory_pool Threads::Threads)
 target_link_libraries(CentralCacheTest PRIVATE memory_pool Threads::Threads)
+target_link_libraries(MemoryPoolBenchmark PRIVATE memory_pool Threads::Threads)
