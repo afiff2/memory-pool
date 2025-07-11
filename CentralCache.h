@@ -22,7 +22,7 @@ class CentralCache
   public:
     static CentralCache &getInstance();
 
-    void *fetchRange(size_t index);
+    FetchResult fetchRange(size_t index, size_t maxBatch);
 
     void returnRange(void *start, size_t index);
 
@@ -33,7 +33,7 @@ class CentralCache
     CentralCache();
     ~CentralCache();
 
-    void *fetchFromPageCache(size_t index);
+    FetchResult fetchFromPageCache(size_t index);
 
     SpanTracker *getSpanTracker(void *block, size_t index);
     void updateSpanFreeCount(SpanTracker *tracker, size_t freeCount, size_t index);
@@ -58,12 +58,12 @@ class CentralCache
         std::atomic<size_t> cnt{0};
     };
 
-    std::array<FreeListHead, FREE_LIST_SIZE> centralFree_;
-    std::array<SpinLock, FREE_LIST_SIZE> locks_;
-    std::array<DelayCounter, FREE_LIST_SIZE> delay_;
-    std::array<std::chrono::steady_clock::time_point, FREE_LIST_SIZE> lastReturn_;
+    std::array<FreeListHead, NUM_CLASSES> centralFree_;
+    std::array<SpinLock, NUM_CLASSES> locks_;
+    std::array<DelayCounter, NUM_CLASSES> delay_;
+    std::array<std::chrono::steady_clock::time_point, NUM_CLASSES> lastReturn_;
 
-    std::array<std::unordered_map<void*, SpanTracker*>, FREE_LIST_SIZE> spanPageMap_{};//记录页对应的SpanTracker(加锁对index执行，所以有index项)
+    std::array<std::unordered_map<void*, SpanTracker*>, NUM_CLASSES> spanPageMap_{};//记录页对应的SpanTracker(加锁对index执行，所以有index项)
 };
 
 } // namespace memory_pool

@@ -56,31 +56,45 @@ CentralCache::~CentralCache() {
     }
 }
 
-void *CentralCache::fetchRange(size_t index)
+FetchResult CentralCache::fetchRange(size_t index, size_t maxBatch)
 {
-    if (index >= FREE_LIST_SIZE) //超过上限，错误申请
-        return nullptr;
+    if (index >= NUM_CLASSES) //超过上限，错误申请
+        return {nullptr, 0};
+
     SpinGuard guard{locks_[index].flag};
 
-    void *blk = centralFree_[index].head.load(std::memory_order_relaxed);
-    if (!blk)
-    { // 没有中心缓存，申请页缓存
-        blk = fetchFromPageCache(index);
-        return blk;
+    // 如果 free 列表空，先从页缓存拉出一整条链
+    void* list = centralFree_[index].head.load(std::memory_order_relaxed);
+    if (!list) {
+        auto refill = fetchFromPageCache(index);
+        if (!refill.head)
+            return {nullptr, 0};
+        list = refill.head;
     }
+    // 从 list 上 detach 最多 maxBatch 个块
+    void* cur  = list;
+    void* prev = nullptr;
+    size_t cnt = 0;
+    while (cur && cnt < maxBatch) {
+        prev = cur;
+        cur  = *reinterpret_cast<void**>(cur);
+        ++cnt;
+    }
+    FetchResult res{ list, cnt };
 
-    // 与链表断开
-    void *next = *reinterpret_cast<void **>(blk);
-    centralFree_[index].head.store(next, std::memory_order_relaxed);
-    *reinterpret_cast<void **>(blk) = nullptr;
+    // 把剩下的块存回 centralFree_
+    centralFree_[index].head.store(cur, std::memory_order_relaxed);
+    // 断开前面这 cnt 块
+    if (prev)
+        *reinterpret_cast<void**>(prev) = nullptr; 
 
-    return blk;
+    return res;
 }
 
 //传入的块链不一定属于同一个页集
 void CentralCache::returnRange(void *start, size_t index)
 {
-    if (!start || index >= FREE_LIST_SIZE) //错误请求
+    if (!start || index >= NUM_CLASSES) //错误请求
         return;
 
     SpinGuard guard{locks_[index].flag};
@@ -182,9 +196,9 @@ void CentralCache::updateSpanFreeCount(SpanTracker *tr, size_t freeCount, size_t
     PageCache::getInstance().deallocateSpan(spanBase);
 }
 
-void *CentralCache::fetchFromPageCache(size_t index)
+FetchResult CentralCache::fetchFromPageCache(size_t index)
 {
-    const size_t blkSize = (index + 1) * ALIGNMENT; // 需要的块的大小
+    const size_t blkSize = SizeClass::getSize(index); // 需要的块的大小
 
     // 计算需要的页数
     size_t pages = (blkSize + PageCache::PAGE_SIZE - 1) / PageCache::PAGE_SIZE;
@@ -193,7 +207,7 @@ void *CentralCache::fetchFromPageCache(size_t index)
 
     void *span = PageCache::getInstance().allocateSpan(pages);
     if (!span)
-        return nullptr; // 申请失败
+        return {nullptr, 0}; // 申请失败
 
     const size_t blkNum = (pages * PageCache::PAGE_SIZE) / blkSize; //拿到的块数（有内碎片）
 
@@ -202,10 +216,6 @@ void *CentralCache::fetchFromPageCache(size_t index)
     for (size_t i = 1; i < blkNum; ++i)
         *reinterpret_cast<void **>(base + (i - 1) * blkSize) = base + i * blkSize;
     *reinterpret_cast<void **>(base + (blkNum - 1) * blkSize) = nullptr;
-
-    if (blkNum > 1) // 单块不用处理，因为进入fetchFromPageCache 的前提是centralFree_[index].head为空
-        centralFree_[index].head.store(base + blkSize, std::memory_order_relaxed); //挂载第二个块
-    *reinterpret_cast<void **>(base) = nullptr; // 断掉前两个块的连接
 
     // 添加一个新的tracker
     SpanTracker* tr = new SpanTracker{};
@@ -216,7 +226,7 @@ void *CentralCache::fetchFromPageCache(size_t index)
     for (size_t p = 0; p < pages; ++p)
         spanPageMap_[index][base + p * PageCache::PAGE_SIZE] = tr;//记录每一页的SpanTracker
 
-    return base; // first block to caller
+    return { base, blkNum }; // first block to caller
 }
 
 } // namespace memory_pool

@@ -32,8 +32,8 @@ private:
     bool shouldReturnToCentralCache(size_t index);
 private:
     // 每个线程的空闲链表数组
-    std::array<void*, FREE_LIST_SIZE>  freeList_; 
-    std::array<size_t, FREE_LIST_SIZE> freeListSize_; // 空闲链表大小统计   
+    std::array<void*, NUM_CLASSES>  freeList_; 
+    std::array<size_t, NUM_CLASSES> freeListSize_; // 空闲链表大小统计   
 };
 
 } // namespace memory_pool

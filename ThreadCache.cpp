@@ -64,37 +64,58 @@ void ThreadCache::deallocate(void *ptr, size_t size)
 // 判断是否需要将内存回收给中心缓存
 bool ThreadCache::shouldReturnToCentralCache(size_t index)
 {
-    // 设定阈值，例如：当自由链表的大小超过一定数量时
-    size_t threshold = 256;
-    return (freeListSize_[index] > threshold);
+    // 设定阈值，当自由链表的大小超过一定数量时
+    size_t blockSize = SizeClass::getSize(index);
+
+    // 不同尺寸用不同保留上限
+    size_t threshold;
+    if (blockSize <= MAX_SMALL_SZ) {
+        threshold = 256;
+    }
+    else if (blockSize <= MAX_MEDIUM_SZ) {
+        threshold = 128;
+    }
+    else if (blockSize <= MAX_LARGE_SZ) {
+        threshold = 32;
+    }
+    else {
+        threshold = 8;
+    }
+
+    // 如果本地空闲链表数量超过阈值，就返还一部分给 CentralCache
+    return freeListSize_[index] > threshold;
 }
 
 void *ThreadCache::fetchFromCentralCache(size_t index)
 {
-    // 从中心缓存批量获取内存
-    void *start = CentralCache::getInstance().fetchRange(index);
-    if (!start)
-        return nullptr;
+    size_t blockSize = SizeClass::getSize(index);
 
-    // 取一个返回，其余放入自由链表
-    void *result = start;
-    freeList_[index] = *reinterpret_cast<void **>(start);
-
-    // 更新自由链表大小
-    size_t batchNum = 0;
-    void *current = start; // 从start开始遍历
-
-    // 计算从中心缓存获取的内存块数量
-    while (current != nullptr)
-    {
-        batchNum++;
-        current = *reinterpret_cast<void **>(current); // 遍历下一个内存块
+    // 根据大小选不同的批量抓取数
+    size_t batchNum;
+    if (blockSize <= MAX_SMALL_SZ) {
+        batchNum = 64;      // ≤512B：一次取 64 块
+    }
+    else if (blockSize <= MAX_MEDIUM_SZ) {
+        batchNum = 32;      // 513B–4KB：一次取 32 块
+    }
+    else if (blockSize <= MAX_LARGE_SZ) {
+        batchNum = 16;      // 4KB–64KB：一次取 16 块
+    }
+    else {
+        batchNum = 4;       // >64KB：一次取 4 块
     }
 
-    // 更新freeListSize_，增加获取的内存块数量(有一块被返回了，要减1)
-    freeListSize_[index] += batchNum - 1;
+    // 从中心缓存批量获取内存
+    auto res = CentralCache::getInstance().fetchRange(index, batchNum);
+    if (!res.head) return nullptr;
 
-    return result;
+    // 取一个返回，其余放入自由链表
+    freeList_[index] = *reinterpret_cast<void**>(res.head);
+
+    // 更新freeListSize_，增加获取的内存块数量(有一块被返回了，要减1)
+    freeListSize_[index] += (res.count - 1);
+
+    return res.head;
 }
 
 void ThreadCache::returnToCentralCache(size_t index)
