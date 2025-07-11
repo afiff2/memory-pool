@@ -3,6 +3,8 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace memory_pool
 {
@@ -30,7 +32,7 @@ class CentralCache
 
   private:
     CentralCache();
-    ~CentralCache() = default;
+    ~CentralCache();
 
     void *fetchFromPageCache(size_t index);
 
@@ -63,9 +65,6 @@ class CentralCache
     std::array<std::chrono::steady_clock::time_point, FREE_LIST_SIZE> lastReturn_;
 
     std::array<std::unordered_map<void*, SpanTracker*>, FREE_LIST_SIZE> spanPageMap_{};//记录页对应的SpanTracker(加锁对index执行，所以有index项)
-
-    std::array<SpanTracker, 1024> spanTrackers_;
-    std::atomic<size_t> spanCount_{0};
 };
 
 } // namespace memory_pool

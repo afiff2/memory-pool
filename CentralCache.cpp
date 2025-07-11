@@ -40,6 +40,21 @@ CentralCache::CentralCache()
         t = now;
 }
 
+CentralCache::~CentralCache() {
+    // 收集所有唯一的 SpanTracker 指针
+    std::unordered_set<SpanTracker*> uniqueTrackers;
+    for (auto &pageMap : spanPageMap_) {
+        for (auto &entry : pageMap) {
+            uniqueTrackers.insert(entry.second);
+        }
+    }
+
+    // 删除所有 SpanTracker
+    for (auto *tr : uniqueTrackers) {
+        delete tr;
+    }
+}
+
 void *CentralCache::fetchRange(size_t index)
 {
     if (index >= FREE_LIST_SIZE) //超过上限，错误申请
@@ -166,6 +181,9 @@ void CentralCache::updateSpanFreeCount(SpanTracker *tr, size_t add, size_t index
     for (size_t p = 0; p < pages; ++p)
         spanPageMap_[index].erase(static_cast<char *>(spanBase) + p * PageCache::PAGE_SIZE);
 
+    // 释放对应的SpanTracker
+    delete tr;
+
     PageCache::getInstance().deallocateSpan(spanBase);
 }
 
@@ -193,17 +211,14 @@ void *CentralCache::fetchFromPageCache(size_t index)
     centralFree_[index].head.store(base + blkSize, std::memory_order_relaxed); //挂载第二个块
 
     // 添加一个新的tracker
-    size_t trIdx = spanCount_.fetch_add(1, std::memory_order_acq_rel); //确保对其他线程可见
-    assert(trIdx < spanTrackers_.size() && "SpanTracker overflow – increase capacity");
-
-    SpanTracker &tr = spanTrackers_[trIdx];
-    tr.spanAddr.store(span, std::memory_order_relaxed);
-    tr.numPages.store(pages, std::memory_order_relaxed);
-    tr.blockCount.store(blkNum, std::memory_order_relaxed);
-    tr.freeCount.store(blkNum - 1, std::memory_order_relaxed);
+    SpanTracker* tr = new SpanTracker{};
+    tr->spanAddr.store(span, std::memory_order_relaxed);
+    tr->numPages.store(pages, std::memory_order_relaxed);
+    tr->blockCount.store(blkNum, std::memory_order_relaxed);
+    tr->freeCount.store(blkNum - 1, std::memory_order_relaxed);
 
     for (size_t p = 0; p < pages; ++p)
-        spanPageMap_[index][base + p * PageCache::PAGE_SIZE] = &tr;//记录每一页的SpanTracker
+        spanPageMap_[index][base + p * PageCache::PAGE_SIZE] = tr;//记录每一页的SpanTracker
 
     return base; // first block to caller
 }
