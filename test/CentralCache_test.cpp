@@ -16,13 +16,12 @@ void testSingleThread() {
     constexpr int LOOPS = 1000;       // 每个大小循环次数
 
     for (size_t idx = 0; idx < MAX_INDEX; ++idx) {
-        size_t blkSize = (idx+1) * ALIGNMENT;
         // 连续 LOOPS 次 fetch 和 return
         for (int i = 0; i < LOOPS; ++i) {
-            void* p = CentralCache::instance().fetchRange(idx);
+            void* p = CentralCache::getInstance().fetchRange(idx);
             assert(p != nullptr && "fetchRange 返回 nullptr");
             // 可以在这里填充数据测试可写性
-            CentralCache::instance().returnRange(p, blkSize, idx);
+            CentralCache::getInstance().returnRange(p, idx);
         }
         std::cout << "[SingleThread] index=" << idx << " OK\n";
     }
@@ -41,15 +40,14 @@ void testMultiThread() {
         std::uniform_int_distribution<size_t> dist_idx(0, MAX_INDEX-1);
         for (int op = 0; op < OPS_PER_THREAD; ++op) {
             size_t idx = dist_idx(rng);
-            size_t blkSize = (idx+1) * ALIGNMENT;
-            void* p = CentralCache::instance().fetchRange(idx);
+            void* p = CentralCache::getInstance().fetchRange(idx);
             if (!p) {
                 std::cerr << "[Thread " << tid << "] fetchRange idx="<<idx<<" 返回 nullptr\n";
                 continue;
             }
             // 模拟做点工作
             std::this_thread::sleep_for(std::chrono::microseconds(10));
-            CentralCache::instance().returnRange(p, blkSize, idx);
+            CentralCache::getInstance().returnRange(p, idx);
         }
         std::cout << "[Thread " << tid << "] Done\n";
     };

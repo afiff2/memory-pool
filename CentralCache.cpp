@@ -27,7 +27,7 @@ class SpinGuard
     std::atomic_flag &flag_;
 };
 
-CentralCache &CentralCache::instance()
+CentralCache &CentralCache::getInstance()
 {
     static CentralCache g;
     return g;
@@ -77,19 +77,17 @@ void *CentralCache::fetchRange(size_t index)
     return blk;
 }
 
-void CentralCache::returnRange(void *start, size_t size, size_t index)
+//传入的块链不一定属于同一个页集
+void CentralCache::returnRange(void *start, size_t index)
 {
     if (!start || index >= FREE_LIST_SIZE) //错误请求
         return;
-
-    const size_t blkSize = (index + 1) * ALIGNMENT; //块的大小
-    const size_t blkCount = size / blkSize; //块数
 
     SpinGuard guard{locks_[index].flag};
 
     // 到最后一个块
     void *tail = start;
-    for (size_t i = 1; i < blkCount && *reinterpret_cast<void **>(tail); ++i)
+    while (*reinterpret_cast<void **>(tail))
         tail = *reinterpret_cast<void **>(tail);
     //插入空闲头部
     *reinterpret_cast<void **>(tail) = centralFree_[index].head.load(std::memory_order_relaxed);
@@ -117,6 +115,7 @@ SpanTracker *CentralCache::getSpanTracker(void *block, size_t index)
     return it == map.end() ? nullptr : it->second;
 }
 
+//该index太久没归还 or 接受了太多的ThreadCache的归还
 bool CentralCache::shouldDelayReturn(size_t index, size_t curCnt, std::chrono::steady_clock::time_point now) const
 {
     return curCnt >= MAX_DELAY_COUNT || (now - lastReturn_[index]) >= DELAY_INTERVAL;
@@ -127,7 +126,7 @@ void CentralCache::performDelayedReturn(size_t index)
     delay_[index].cnt.store(0, std::memory_order_relaxed);
     lastReturn_[index] = std::chrono::steady_clock::now();
 
-    // 统计每一页的空闲块数
+    // 统计每一页集的空闲块数
     std::unordered_map<SpanTracker *, size_t> counter;
     void *blk = centralFree_[index].head.load(std::memory_order_relaxed);
     while (blk)
@@ -204,7 +203,9 @@ void *CentralCache::fetchFromPageCache(size_t index)
         *reinterpret_cast<void **>(base + (i - 1) * blkSize) = base + i * blkSize;
     *reinterpret_cast<void **>(base + (blkNum - 1) * blkSize) = nullptr;
 
-    centralFree_[index].head.store(base + blkSize, std::memory_order_relaxed); //挂载第二个块
+    if (blkNum > 1) // 单块不用处理，因为进入fetchFromPageCache 的前提是centralFree_[index].head为空
+        centralFree_[index].head.store(base + blkSize, std::memory_order_relaxed); //挂载第二个块
+    *reinterpret_cast<void **>(base) = nullptr; // 断掉前两个块的连接
 
     // 添加一个新的tracker
     SpanTracker* tr = new SpanTracker{};

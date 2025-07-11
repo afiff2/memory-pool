@@ -20,11 +20,11 @@ struct SpanTracker
 class CentralCache
 {
   public:
-    static CentralCache &instance();
+    static CentralCache &getInstance();
 
     void *fetchRange(size_t index);
 
-    void returnRange(void *start, size_t size, size_t index);
+    void returnRange(void *start, size_t index);
 
     CentralCache(const CentralCache &) = delete;
     CentralCache &operator=(const CentralCache &) = delete;

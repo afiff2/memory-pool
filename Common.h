@@ -19,13 +19,7 @@ constexpr size_t FREE_LIST_SIZE = MAX_BYTES / ALIGNMENT; // ALIGNMENT等于指�
 class SizeClass
 {
   public:
-    [[nodiscard]]
-    static inline constexpr size_t roundUp(size_t bytes) noexcept // constexpr 可以在编译期内求常量值
-    {
-        return (bytes + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
-    }
-
-    [[nodiscard]]
+    [[nodiscard]] // 返回值不应被忽略
     static inline constexpr size_t getIndex(size_t bytes) noexcept // 向上整除后-1
     {
         // 已知 ALIGNMENT 是 2^k，除以 ALIGNMENT 相当于右移 k 位
