@@ -12,9 +12,9 @@ namespace memory_pool
 // 跟踪一段连续span的分配状态
 struct SpanTracker
 {
-    std::atomic<void *> spanAddr{nullptr}; // 这段 span 的起始地址
-    std::atomic<size_t> numPages{0};       // 这段 span 包含多少页
-    std::atomic<size_t> blockCount{0};     // 这段 span 被划分成了多少个内存块
+    void * spanAddr = nullptr; // 这段 span 的起始地址
+    size_t numPages = 0;       // 这段 span 包含多少页
+    size_t blockCount = 0;     // 这段 span 被划分成了多少个内存块
     SpanTracker *next = nullptr;           // 用于微型SpanTracker池
 };
 

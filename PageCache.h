@@ -33,7 +33,7 @@ class PageCache
     {
         void *pageAddr;       // 起始地址
         std::size_t numPages; // 页数
-        Span *prev;           // Modified: 新增前驱指针
+        Span *prev;           // 前驱指针
         Span *next;           // 空闲链表指针
     };
 

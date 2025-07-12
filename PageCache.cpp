@@ -29,14 +29,14 @@ PageCache::~PageCache()
     SpanPool::clear();
 }
 
-// 分配
+// 申请numPages个页的内存
 void *PageCache::allocateSpan(std::size_t numPages)
 {
     if (numPages == 0)
         return nullptr;
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // 1先在空闲链表中找 ≥numPages 的块
+    // 先在空闲链表中找 ≥numPages 的块
     auto it = freeSpans_.lower_bound(numPages);
     if (it != freeSpans_.end())
     {

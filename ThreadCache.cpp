@@ -1,5 +1,6 @@
 #include "ThreadCache.h"
 #include "CentralCache.h"
+#include "PageCache.h"
 #include <stdlib.h>
 
 namespace memory_pool
@@ -14,8 +15,9 @@ void *ThreadCache::allocate(size_t size)
 
     if (size > MAX_BYTES)
     {
-        // 大对象直接从系统分配
-        return malloc(size);
+        // 大对象直接跳级
+        size_t numPages = (size + PageCache::PAGE_SIZE - 1) / PageCache::PAGE_SIZE;
+        return PageCache::getInstance().allocateSpan(numPages);
     }
 
     size_t index = SizeClass::getIndex(size);
@@ -41,7 +43,7 @@ void ThreadCache::deallocate(void *ptr, size_t size)
         return;
     if (size > MAX_BYTES)
     {
-        free(ptr);
+        PageCache::getInstance().deallocateSpan(ptr);
         return;
     }
 

@@ -169,12 +169,12 @@ void CentralCache::updateSpanFreeCount(SpanTracker *tr, size_t freeCount, size_t
 {
     if (!tr)
         return;
-    if (freeCount != tr->blockCount.load(std::memory_order_relaxed)) //不是所有的块都空闲，暂时不归还
+    if (freeCount != tr->blockCount) //不是所有的块都空闲，暂时不归还
         return;
 
     // 所有的块都空闲
-    void *spanBase = tr->spanAddr.load(std::memory_order_relaxed); //启示地址
-    size_t pages = tr->numPages.load(std::memory_order_relaxed); //页数
+    void *spanBase = tr->spanAddr; //启示地址
+    size_t pages = tr->numPages; //页数
 
     // 从空闲链中移除
     void *prev = nullptr;
@@ -229,9 +229,9 @@ FetchResult CentralCache::fetchFromPageCache(size_t index)
 
     // 添加一个新的tracker
     SpanTracker* tr = getSpanTrackerFromPool(index);
-    tr->spanAddr.store(span, std::memory_order_relaxed);
-    tr->numPages.store(pages, std::memory_order_relaxed);
-    tr->blockCount.store(blkNum, std::memory_order_relaxed);
+    tr->spanAddr = span;
+    tr->numPages = pages;
+    tr->blockCount = blkNum;
 
     for (size_t p = 0; p < pages; ++p)
         spanPageMap_[index][base + p * PageCache::PAGE_SIZE] = tr;//记录每一页的SpanTracker
