@@ -61,8 +61,8 @@ CentralCache::CentralCache()
 CentralCache::~CentralCache() {
     // 收集所有唯一的 SpanTracker 指针
     std::unordered_set<SpanTracker*> uniqueTrackers;
-    for (auto &m : spanMap_) {
-        for (auto &entry : m) {
+    for (auto &pageMap : spanPageMap_) {
+        for (auto &entry : pageMap) {
             uniqueTrackers.insert(entry.second);
         }
     }
@@ -137,8 +137,8 @@ SpanTracker * CentralCache::fetchFromPageCache(size_t index)
     tr->freeAll();
     tr->next = nullptr;
 
-    uintptr_t base = reinterpret_cast<uintptr_t>(span);
-    spanMap_[index][base] = tr;
+    for (size_t p = 0; p < pages; ++p)
+        spanPageMap_[index][static_cast<char*>(span) + p * PageCache::PAGE_SIZE] = tr;//记录每一页的SpanTracker
 
     return tr;
 }
@@ -198,8 +198,8 @@ void CentralCache::returnToPageCache(size_t index, SpanTracker* st)
     size_t pages = st->numPages;
 
     // 释放对应的哈希表
-    uintptr_t base = reinterpret_cast<uintptr_t>(st->spanAddr);
-    spanMap_[index].erase(base);
+    for (size_t p = 0; p < pages; ++p)
+        spanPageMap_[index].erase(static_cast<char *>(spanBase) + p * PageCache::PAGE_SIZE);
 
     // 释放对应的SpanTracker
     putSpanTrackerToPool(st, index);
@@ -208,21 +208,16 @@ void CentralCache::returnToPageCache(size_t index, SpanTracker* st)
 }
 
 
-SpanTracker *CentralCache::getSpanTracker(void *block, size_t index) 
+SpanTracker *CentralCache::getSpanTracker(void *block, size_t index)
 {
+    // 把任意地址 addr 变成它所在页的起始地址 pageBase
     uintptr_t addr = reinterpret_cast<uintptr_t>(block);
-    auto &m = spanMap_[index];
-    // upper_bound 找到第一个 key > addr
-    auto it = m.upper_bound(addr);
-    if (it == m.begin())
-        return nullptr;    // 全部 key 都 > addr，找不到
-    --it; // 现在 it->first <= addr
+    uintptr_t pageMask = ~(PageCache::PAGE_SIZE - 1ULL);
+    void *pageBase = reinterpret_cast<void *>(addr & pageMask);
 
-    SpanTracker *st = it->second;
-    uintptr_t spanBase = it->first;
-    uintptr_t spanEnd  = spanBase + st->numPages * PageCache::PAGE_SIZE;
-    assert(addr < spanEnd);
-    return st;
+    auto &map = spanPageMap_[index];
+    auto it = map.find(pageBase);
+    return it == map.end() ? nullptr : it->second;
 }
 
 inline void CentralCache::pushFront(size_t index, SpanTracker* st) {
