@@ -60,9 +60,9 @@ CentralCache::CentralCache()
         // 预计这个 size class 下，最多的记录
         size_t maxPages = kMaxBytesPerIndex * 2 / PageCache::PAGE_SIZE;
         // 降低负载因子到 0.5（可选，越小冲突越少，但内存越多）
-        spanPageMap_[idx].max_load_factor(0.5f);
+        spanPageMap_[idx].m.max_load_factor(0.5f);
         // 分配足够多的桶
-        spanPageMap_[idx].rehash(maxPages * 2);
+        spanPageMap_[idx].m.rehash(maxPages * 2);
     }
 }
 
@@ -71,12 +71,12 @@ CentralCache::~CentralCache() {
     // 收集所有唯一的 SpanTracker 指针
     std::unordered_set<SpanTracker*> uniqueTrackers;
     for (auto &pageMap : spanPageMap_) {
-        for (auto &entry : pageMap) {
+        for (auto &entry : pageMap.m) {
             uniqueTrackers.insert(entry.second);
         }
     }
     for (auto &mp : spanMap_) {
-        for (auto &entry : mp) {
+        for (auto &entry : mp.m) {
             uniqueTrackers.insert(entry.second);
         }
     }
@@ -88,7 +88,7 @@ CentralCache::~CentralCache() {
 
     //清理池子
     for (size_t i = 0; i < NUM_CLASSES; ++i) {
-        SpanTracker* cur = spanTrackerPools_[i];
+        SpanTracker* cur = central_[i].poolHead;
         while (cur) {
             SpanTracker* next = cur->next;
             delete cur;
@@ -102,31 +102,31 @@ FetchResult CentralCache::fetchRange(size_t index, size_t maxBatch)
     if (index >= NUM_CLASSES || maxBatch == 0) //超过上限，错误申请
         return {nullptr, 0};
 
-    SpinGuard guard{locks_[index].flag};
+    SpinGuard guard{central_[index].lock};
 
     // 确保 Free 列表非空，不空才去取
-    if (centralFree_[index] == nullptr) {
+    if (central_[index].freeList == nullptr) {
         SpanTracker* st = fetchFromPageCache(index);
         if (!st) return {nullptr, 0};
         // 把新 span 挂到列表头
         pushFront(index, st);
         //完全空闲计数
-        ++emptySpanCount_[index]; 
+        ++central_[index].emptyCount; 
     }
 
     // 从列表头取
-    SpanTracker* st = centralFree_[index];
+    SpanTracker* st = central_[index].freeList;
     bool wasEmpty = st->allFree();
     const size_t blkSize = SizeClass::getSize(index); // 块的大小
     auto result = st->allocateBatch(maxBatch, blkSize);
 
     if (wasEmpty && result.count > 0) {
-        --emptySpanCount_[index]; // 完全空闲计数
+        --central_[index].emptyCount; // 完全空闲计数
     }
 
     // 如果这个 span 全分配完了，就把它从列表里摘掉
     if (st->allAllocated()) {
-        removeFromList(centralFree_[index], st);
+        removeFromList(central_[index].freeList, st);
     }
 
     return result; // 编译器将通过 RVO 或移动语义避免拷贝
@@ -154,12 +154,12 @@ SpanTracker * CentralCache::fetchFromPageCache(size_t index)
     if(index < CLS_MEDIUM)
     {
         for (size_t p = 0; p < pages; ++p)
-            spanPageMap_[index][static_cast<char*>(span) + p * PageCache::PAGE_SIZE] = tr;//记录每一页的SpanTracker
+            spanPageMap_[index].m[static_cast<char*>(span) + p * PageCache::PAGE_SIZE] = tr;//记录每一页的SpanTracker
     }
     else
     {
         uintptr_t base = reinterpret_cast<uintptr_t>(span);
-        spanMap_[index-CLS_MEDIUM][base] = tr;
+        spanMap_[index-CLS_MEDIUM].m[base] = tr;
     }
     
     return tr;
@@ -179,7 +179,7 @@ void CentralCache::returnRange(void *start, size_t index)
     if (maxEmptySpans < 1) maxEmptySpans = 1;           // 最少留 1 个
 
 
-    SpinGuard guard{locks_[index].flag};
+    SpinGuard guard{central_[index].lock};
 
     void* p = start;
     while (p != nullptr) {
@@ -205,9 +205,9 @@ void CentralCache::returnRange(void *start, size_t index)
             pushFront(index, st);
 
         if(!wasEmpty && st->allFree()){
-            ++emptySpanCount_[index];
+            ++central_[index].emptyCount;
             //如果有10个完全空闲的SpanTracker，就释放一个
-            if(emptySpanCount_[index] > maxEmptySpans) //魔数字
+            if(central_[index].emptyCount > maxEmptySpans) //魔数字
                 returnToPageCache(index, st);
         }
 
@@ -218,10 +218,10 @@ void CentralCache::returnRange(void *start, size_t index)
 void CentralCache::returnToPageCache(size_t index, SpanTracker* st)
 {
     //减去完全空闲的计数
-    emptySpanCount_[index]--;
+    central_[index].emptyCount--;
 
     //从链表中摘除
-    removeFromList(centralFree_[index], st);
+    removeFromList(central_[index].freeList, st);
 
     void *spanBase = st->spanAddr;
     size_t pages = st->numPages;
@@ -231,12 +231,12 @@ void CentralCache::returnToPageCache(size_t index, SpanTracker* st)
     {
         // 释放对应的哈希表
         for (size_t p = 0; p < pages; ++p)
-            spanPageMap_[index].erase(static_cast<char *>(spanBase) + p * PageCache::PAGE_SIZE);
+            spanPageMap_[index].m.erase(static_cast<char *>(spanBase) + p * PageCache::PAGE_SIZE);
     }
     else
     {
         uintptr_t base = reinterpret_cast<uintptr_t>(st->spanAddr);
-        spanMap_[index - CLS_MEDIUM].erase(base);
+        spanMap_[index - CLS_MEDIUM].m.erase(base);
     }
 
 
@@ -258,16 +258,16 @@ SpanTracker *CentralCache::getSpanTracker(void *block, size_t index)
         void *pageBase = reinterpret_cast<void *>(addr & pageMask);
 
         auto &map = spanPageMap_[index];
-        auto it = map.find(pageBase);
-        return it == map.end() ? nullptr : it->second;
+        auto it = map.m.find(pageBase);
+        return it == map.m.end() ? nullptr : it->second;
     }
     else
     {
         uintptr_t addr = reinterpret_cast<uintptr_t>(block);
         auto &m = spanMap_[index-CLS_MEDIUM];
         // upper_bound 找到第一个 key > addr
-        auto it = m.upper_bound(addr);
-        if (it == m.begin())
+        auto it = m.m.upper_bound(addr);
+        if (it == m.m.begin())
             return nullptr;    // 全部 key 都 > addr，找不到
         --it; // 现在 it->first <= addr
 
@@ -277,13 +277,13 @@ SpanTracker *CentralCache::getSpanTracker(void *block, size_t index)
 }
 
 inline void CentralCache::pushFront(size_t index, SpanTracker* st) {
-    SpanTracker* oldHead = centralFree_[index];
+    SpanTracker* oldHead = central_[index].freeList;
     st->prev = nullptr;
     st->next = oldHead;
     if (oldHead) {
         oldHead->prev = st;
     }
-    centralFree_[index] = st;
+    central_[index].freeList = st;
 }
 
 inline void CentralCache::removeFromList(SpanTracker*& head, SpanTracker* st) {

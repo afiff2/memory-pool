@@ -11,7 +11,7 @@ namespace memory_pool
 {
 
 // 跟踪一段连续span的分配状态
-class SpanTracker
+class alignas(64) SpanTracker // 注：SpanTracker > 64字节
 {
     public:
     void * spanAddr = nullptr; // 这段 span 的起始地址
@@ -103,24 +103,30 @@ class CentralCache
     // 单个 index 最多保留 4 MB
     static constexpr size_t kMaxBytesPerIndex = 4 * 1024 * 1024;  // 4 MB
 
-    struct alignas(64) SpinLock{
-        std::atomic_flag flag = ATOMIC_FLAG_INIT;
+    struct alignas(64) CentralClass {
+        SpanTracker* freeList = nullptr; // 原 centralFree_[i]
+        size_t emptyCount = 0;  // 原 emptySpanCount_[i]
+        SpanTracker* poolHead = nullptr; // 原 spanTrackerPools_[i]
+        std::atomic_flag lock = ATOMIC_FLAG_INIT; // 已经是 64 字节对齐
+    };
+    static_assert(sizeof(CentralClass) == 64, "CentralClass must be exactly 64 bytes to avoid false sharing.");
+
+    std::array<CentralClass, NUM_CLASSES> central_;
+
+    template<typename Map>
+    struct alignas(64) AlignedMap {
+        Map m;
     };
 
-    std::array<SpanTracker *, NUM_CLASSES> centralFree_ = {};
-    std::array<size_t, NUM_CLASSES> emptySpanCount_{}; //完全空闲的SpanTracker有几个
-    std::array<SpinLock, NUM_CLASSES> locks_;
-
     //记录页对应的SpanTracker(加锁对index执行，所以有index项)
-    std::array<std::unordered_map<void*, SpanTracker*>, CLS_MEDIUM> spanPageMap_{};
-    std::array<std::map<uintptr_t, SpanTracker*>, NUM_CLASSES - CLS_MEDIUM> spanMap_{};
+    std::array<AlignedMap<std::unordered_map<void*, SpanTracker*>>, CLS_MEDIUM> spanPageMap_;
+    std::array<AlignedMap<std::map<uintptr_t, SpanTracker*>>, NUM_CLASSES - CLS_MEDIUM> spanMap_;
 
     // 微型spanTracker池,必须在index自旋锁内使用
-    std::array<SpanTracker *, NUM_CLASSES> spanTrackerPools_;
     inline SpanTracker* getSpanTrackerFromPool(size_t index) {
-        SpanTracker* node = spanTrackerPools_[index];
+        SpanTracker* node = central_[index].poolHead;
         if (node) {
-            spanTrackerPools_[index] = node->next;
+            central_[index].poolHead = node->next;
             node->next = nullptr;
             node->prev = nullptr;
             return node;
@@ -129,9 +135,9 @@ class CentralCache
     }
 
     inline void putSpanTrackerToPool(SpanTracker* tr, size_t index) {
-        tr->next = spanTrackerPools_[index];
+        tr->next = central_[index].poolHead;
         tr->prev = nullptr;
-        spanTrackerPools_[index] = tr;
+        central_[index].poolHead = tr;
     }
 };
 
