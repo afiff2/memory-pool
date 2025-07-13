@@ -74,7 +74,7 @@ FetchResult CentralCache::fetchRange(size_t index, size_t maxBatch)
     SpinGuard guard{locks_[index].flag};
 
     // 如果 free 列表空，先从页缓存拉出一整条链
-    void* list = centralFree_[index].head.load(std::memory_order_relaxed);
+    void* list = centralFree_[index].head;
     if (!list) {
         auto refill = fetchFromPageCache(index);
         if (!refill.head)
@@ -93,7 +93,7 @@ FetchResult CentralCache::fetchRange(size_t index, size_t maxBatch)
     FetchResult res{ list, cnt };
 
     // 把剩下的块存回 centralFree_
-    centralFree_[index].head.store(cur, std::memory_order_relaxed);
+    centralFree_[index].head = cur;
     // 断开前面这 cnt 块
     if (prev)
         *reinterpret_cast<void**>(prev) = nullptr; 
@@ -114,11 +114,11 @@ void CentralCache::returnRange(void *start, size_t index)
     while (*reinterpret_cast<void **>(tail))
         tail = *reinterpret_cast<void **>(tail);
     //插入空闲头部
-    *reinterpret_cast<void **>(tail) = centralFree_[index].head.load(std::memory_order_relaxed);
-    centralFree_[index].head.store(start, std::memory_order_relaxed);
+    *reinterpret_cast<void **>(tail) = centralFree_[index].head;
+    centralFree_[index].head = start;
 
     // 更新延迟计数
-    size_t curCnt = delay_[index].cnt.fetch_add(1, std::memory_order_relaxed) + 1;
+    size_t curCnt = ++delay_[index].cnt;
     auto now = std::chrono::steady_clock::now();
 
     // 检查是否需要执行延迟归还
@@ -147,12 +147,12 @@ bool CentralCache::shouldDelayReturn(size_t index, size_t curCnt, std::chrono::s
 
 void CentralCache::performDelayedReturn(size_t index)
 {
-    delay_[index].cnt.store(0, std::memory_order_relaxed);
+    delay_[index].cnt = 0;
     lastReturn_[index] = std::chrono::steady_clock::now();
 
     // 统计每一页集的空闲块数
     std::unordered_map<SpanTracker *, size_t> counter;
-    void *blk = centralFree_[index].head.load(std::memory_order_relaxed);
+    void *blk = centralFree_[index].head;
     while (blk)
     {
         if (auto *tr = getSpanTracker(blk, index))
@@ -178,7 +178,7 @@ void CentralCache::updateSpanFreeCount(SpanTracker *tr, size_t freeCount, size_t
 
     // 从空闲链中移除
     void *prev = nullptr;
-    void *cur = centralFree_[index].head.load(std::memory_order_relaxed);
+    void *cur = centralFree_[index].head;
     while (cur)
     {
         void *nxt = *reinterpret_cast<void **>(cur);
@@ -187,7 +187,7 @@ void CentralCache::updateSpanFreeCount(SpanTracker *tr, size_t freeCount, size_t
             if (prev)
                 *reinterpret_cast<void **>(prev) = nxt; // 把上一节点的 next 指向 nxt
             else
-                centralFree_[index].head.store(nxt, std::memory_order_relaxed); // 删除头节点
+                centralFree_[index].head = nxt; // 删除头节点
         }
         else
         {

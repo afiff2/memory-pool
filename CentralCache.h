@@ -50,13 +50,13 @@ class CentralCache
 
     // 将变量对齐到 64 字节边界, 避免多线程下伪共享造成的性能下降
     struct alignas(64) FreeListHead{
-        std::atomic<void *> head{nullptr};
+        void * head = nullptr;
     };
     struct alignas(64) SpinLock{
         std::atomic_flag flag = ATOMIC_FLAG_INIT;
     };
     struct alignas(64) DelayCounter{
-        std::atomic<size_t> cnt{0};
+        size_t cnt = 0;
     };
 
     std::array<FreeListHead, NUM_CLASSES> centralFree_;
