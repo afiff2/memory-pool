@@ -29,13 +29,21 @@
 ## 模块结构
 
 ```
-memory_pool/
-├── Common.h          # 对齐与大小类定义
-├── MemoryPool.h      # 对外接口封装
-├── ThreadCache.h/.cpp   # 线程本地缓存
-├── CentralCache.h/.cpp  # 跨线程中央缓存
-├── PageCache.h/.cpp     # OS 页面缓存管理
-└── …
+├── CentralCache.cpp
+├── CentralCache.h
+├── CMakeLists.txt
+├── Common.h
+├── MemoryPool.h
+├── PageCache.cpp
+├── PageCache.h
+├── README.md
+├── test
+│   ├── CentralCache_test.cpp
+│   ├── memory_pool_benchmark.cpp
+│   ├── PageCache_test1.cpp
+│   └── PageCache_test2.cpp
+├── ThreadCache.cpp
+└── ThreadCache.h
 ```
 
 ## 安装与编译
