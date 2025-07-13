@@ -135,7 +135,6 @@ struct BenchmarkResult {
     double   p99_alloc_us{};
     double   avg_free_us{};
     double   p99_free_us{};
-    double   peak_mem_mb{};  // 全局峰值
 };
 
 struct ThreadStats {
@@ -219,7 +218,6 @@ BenchmarkResult run_benchmark(const std::string& title,
     auto t_end = Clock::now();
 
     r.total_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_begin).count();
-    r.peak_mem_mb = static_cast<double>(g_peak_bytes.load()) / (1024.0*1024.0);
 
     // 归总各线程统计
     std::vector<double> all_alloc, all_free;
@@ -266,7 +264,6 @@ void print_result(const BenchmarkResult& r) {
               << std::left<<std::setw(24)<<"P99 alloc (us):"<< std::right<<std::setw(10)<<fmt_f(r.p99_alloc_us)<<"\n"
               << std::left<<std::setw(24)<<"Avg free  (us):"<< std::right<<std::setw(10)<<fmt_f(r.avg_free_us)<<"\n"
               << std::left<<std::setw(24)<<"P99 free  (us):"<< std::right<<std::setw(10)<<fmt_f(r.p99_free_us)<<"\n"
-              << std::left<<std::setw(24)<<"全局峰值内存:"  << std::right<<std::setw(10)<<fmt_f(r.peak_mem_mb)<<" MB\n"
               << "---------------------------\n\n";
 }
 
@@ -287,7 +284,6 @@ void print_comparison(const BenchmarkResult& a, const BenchmarkResult& b) {
     line("P99 alloc (us)",     fmt_f(a.p99_alloc_us), fmt_f(b.p99_alloc_us));
     line("Avg free  (us)",     fmt_f(a.avg_free_us), fmt_f(b.avg_free_us));
     line("P99 free  (us)",     fmt_f(a.p99_free_us), fmt_f(b.p99_free_us));
-    line("峰值内存 (MB)",      fmt_f(a.peak_mem_mb), fmt_f(b.peak_mem_mb));
     std::cout<<std::string(w1+2+w2+2+w2+1,'-')<<"\n";
 }
 

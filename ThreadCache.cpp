@@ -64,28 +64,12 @@ void ThreadCache::deallocate(void *ptr, size_t size)
 }
 
 // 判断是否需要将内存回收给中心缓存
-bool ThreadCache::shouldReturnToCentralCache(size_t index)
-{
-    // 设定阈值，当自由链表的大小超过一定数量时
+bool ThreadCache::shouldReturnToCentralCache(size_t index) {
     size_t blockSize = SizeClass::getSize(index);
+    constexpr size_t kMaxBytesPerIndex = 256 * 1024;  // 256 KB 上限
 
-    // 不同尺寸用不同保留上限
-    size_t threshold;
-    if (blockSize <= MAX_SMALL_SZ) {
-        threshold = 256;
-    }
-    else if (blockSize <= MAX_MEDIUM_SZ) {
-        threshold = 128;
-    }
-    else if (blockSize <= MAX_LARGE_SZ) {
-        threshold = 32;
-    }
-    else {
-        threshold = 8;
-    }
-
-    // 如果本地空闲链表数量超过阈值，就返还一部分给 CentralCache
-    return freeListSize_[index] > threshold;
+    // 如果本地空闲链表总字节数超过 256 KB，就返还给 CentralCache
+    return freeListSize_[index] * blockSize > kMaxBytesPerIndex;
 }
 
 void *ThreadCache::fetchFromCentralCache(size_t index)
@@ -123,7 +107,7 @@ void *ThreadCache::fetchFromCentralCache(size_t index)
 void ThreadCache::returnToCentralCache(size_t index)
 {
     size_t total = freeListSize_[index]; // 总共的自由块
-    size_t keep = std::max(total / 4, size_t(1)); //保留 1/4
+    size_t keep = std::max(total / 2, size_t(1)); //保留 1/2
     // 找到第 keep 个节点
     void* cur = freeList_[index];
     for (size_t i = 1; i < keep; ++i) {
