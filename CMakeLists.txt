@@ -1,6 +1,12 @@
 # 设置 CMake 最低版本
 cmake_minimum_required(VERSION 3.14)
 
+# option(ENABLE_GPROF "Enable gprof profiling" OFF)
+# if(ENABLE_GPROF)
+#   add_compile_options(-pg)
+#   add_link_options(-pg)
+# endif()
+
 # 项目名称和语言
 project(memory-pool LANGUAGES CXX)
 
