@@ -57,8 +57,8 @@ CentralCache::CentralCache()
 {
     for (size_t idx = 0; idx < CLS_MEDIUM; ++idx) 
     {
-        // 预计这个 size class 下，最多 pages 条记录
-        size_t maxPages = 10*1024;
+        // 预计这个 size class 下，最多的记录
+        size_t maxPages = kMaxBytesPerIndex * 2 / PageCache::PAGE_SIZE;
         // 降低负载因子到 0.5（可选，越小冲突越少，但内存越多）
         spanPageMap_[idx].max_load_factor(0.5f);
         // 分配足够多的桶
@@ -172,12 +172,9 @@ void CentralCache::returnRange(void *start, size_t index)
         return;
 
     const size_t blkSize = SizeClass::getSize(index);
-
-    // 单个 index 最多保留 64 MB
-    constexpr size_t kMaxBytesPerIndex = 64 * 1024 * 1024;  // 64 MB
     const size_t spanBytes    = blkSize * SpanTracker::BLOCK_COUNT;
 
-    // 计算：为了不超过 kMaxBytesPerIndex，最多保留多少个 span
+    // 计算：为了不超过 kMaxBytesPerIndex(64MB)，最多保留多少个 span
     size_t maxEmptySpans = (kMaxBytesPerIndex + spanBytes - 1) / spanBytes; // 向上取整
     if (maxEmptySpans < 1) maxEmptySpans = 1;           // 最少留 1 个
 
