@@ -15,20 +15,18 @@ static_assert((ALIGNMENT & (ALIGNMENT - 1)) == 0, "ALIGNMENT must be power-of-tw
 constexpr size_t MAX_SMALL_SZ   = 512;
 constexpr size_t MAX_MEDIUM_SZ  = 4 * 1024;
 constexpr size_t MAX_LARGE_SZ   = 64 * 1024;
-constexpr size_t MAX_BYTES      = 256 * 1024;      // 256KB
+constexpr size_t MAX_BYTES      = MAX_LARGE_SZ;      // 64 KiB
 
 // 级别步长
 constexpr size_t STEP_SMALL   = ALIGNMENT;
 constexpr size_t STEP_MEDIUM  = 64;
 constexpr size_t STEP_LARGE   = 512;
-constexpr size_t STEP_XLARGE  = 4096;
 
 // 各级数量
 constexpr size_t CLS_SMALL   = (MAX_SMALL_SZ   + STEP_SMALL - 1)  / STEP_SMALL;
 constexpr size_t CLS_MEDIUM  = (MAX_MEDIUM_SZ  - MAX_SMALL_SZ   + STEP_MEDIUM - 1) / STEP_MEDIUM;
 constexpr size_t CLS_LARGE   = (MAX_LARGE_SZ   - MAX_MEDIUM_SZ  + STEP_LARGE    - 1) / STEP_LARGE;
-constexpr size_t CLS_XLARGE  = (MAX_BYTES      - MAX_LARGE_SZ   + STEP_XLARGE   - 1) / STEP_XLARGE;
-constexpr size_t NUM_CLASSES = CLS_SMALL + CLS_MEDIUM + CLS_LARGE + CLS_XLARGE;
+constexpr size_t NUM_CLASSES = CLS_SMALL + CLS_MEDIUM + CLS_LARGE;
 
 // 大小类管理
 class SizeClass
@@ -48,8 +46,8 @@ class SizeClass
             return CLS_SMALL + CLS_MEDIUM + off;
         }
         else {
-            size_t off = (bytes - MAX_LARGE_SZ + STEP_XLARGE - 1) / STEP_XLARGE - 1;
-            return CLS_SMALL + CLS_MEDIUM + CLS_LARGE + off;
+            // 超出最大支持尺寸
+            return SIZE_MAX;
         }
     }
     //由 index 映射到 size
@@ -66,11 +64,6 @@ class SizeClass
 
         if (index < CLS_LARGE) {
             return MAX_MEDIUM_SZ + (index + 1) * STEP_LARGE;
-        }
-        index -= CLS_LARGE;
-
-        if (index < CLS_XLARGE) {
-            return MAX_LARGE_SZ + (index + 1) * STEP_XLARGE;
         }
 
         // 超出支持范围

@@ -172,6 +172,16 @@ void CentralCache::returnRange(void *start, size_t index)
         return;
 
     const size_t blkSize = SizeClass::getSize(index);
+
+    // 单个 index 最多保留 64 MB
+    constexpr size_t kMaxBytesPerIndex = 64 * 1024 * 1024;  // 64 MB
+    const size_t spanBytes    = blkSize * SpanTracker::BLOCK_COUNT;
+
+    // 计算：为了不超过 kMaxBytesPerIndex，最多保留多少个 span
+    size_t maxEmptySpans = (kMaxBytesPerIndex + spanBytes - 1) / spanBytes; // 向上取整
+    if (maxEmptySpans < 1) maxEmptySpans = 1;           // 最少留 1 个
+
+
     SpinGuard guard{locks_[index].flag};
 
     void* p = start;
@@ -199,8 +209,8 @@ void CentralCache::returnRange(void *start, size_t index)
 
         if(!wasEmpty && st->allFree()){
             ++emptySpanCount_[index];
-            //如果有多个完全空闲的SpanTracker，就释放一个
-            if(emptySpanCount_[index]>=10)
+            //如果有10个完全空闲的SpanTracker，就释放一个
+            if(emptySpanCount_[index] > maxEmptySpans) //魔数字
                 returnToPageCache(index, st);
         }
 
