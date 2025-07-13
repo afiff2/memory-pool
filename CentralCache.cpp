@@ -32,15 +32,28 @@ FetchResult SpanTracker::allocateBatch(size_t maxBatch, size_t blockSize) {
     void** tailPtr = &head; // 始终指向上一个节点的 next 指针
     size_t got = 0;
     size_t toGrab = std::min(maxBatch, freeCount);
-    // 从头扫描所有块
-    for (size_t idx = 0; idx < BLOCK_COUNT && got < toGrab; ++idx) {
-        if (isFree(idx)) {
+    // 遍历每个 32 位字
+    for (size_t w = 0; w < BITMAP_WORDS && got < toGrab; ++w) {
+        uint32_t avail = ~bitmap[w];
+        // 如果整字已满（即 avail == 0），跳过
+        if (avail == 0) continue;
+        // 本字中还有空闲位，循环取出
+        while (avail != 0 && got < toGrab) {
+            // 找到最低位的 1 对应的块偏移 b
+            unsigned b = __builtin_ctz(avail);
+            size_t idx = (w << 5) + b;
+
             // 标记已分配
             setAllocated(idx);
+
+            // 计算块地址并加入结果链表
             void* blk = static_cast<char*>(spanAddr) + idx * blockSize;
             *tailPtr = blk;
             tailPtr = reinterpret_cast<void**>(blk);
+
             ++got;
+            // 清除已取位
+            avail &= avail - 1;
         }
     }
     *tailPtr = nullptr;
