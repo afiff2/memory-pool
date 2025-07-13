@@ -174,7 +174,7 @@ void CentralCache::returnRange(void *start, size_t index)
     const size_t blkSize = SizeClass::getSize(index);
     const size_t spanBytes    = blkSize * SpanTracker::BLOCK_COUNT;
 
-    // 计算：为了不超过 kMaxBytesPerIndex(64MB)，最多保留多少个 span
+    // 计算：为了不超过 kMaxBytesPerIndex(4MB)，最多保留多少个 span
     size_t maxEmptySpans = (kMaxBytesPerIndex + spanBytes - 1) / spanBytes; // 向上取整
     if (maxEmptySpans < 1) maxEmptySpans = 1;           // 最少留 1 个
 
