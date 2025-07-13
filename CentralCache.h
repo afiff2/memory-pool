@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <map>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace memory_pool
@@ -108,7 +109,8 @@ class CentralCache
     std::array<SpinLock, NUM_CLASSES> locks_;
 
     //记录页对应的SpanTracker(加锁对index执行，所以有index项)
-    std::array<std::unordered_map<void*, SpanTracker*>, NUM_CLASSES> spanPageMap_{};
+    std::array<std::unordered_map<void*, SpanTracker*>, CLS_MEDIUM> spanPageMap_{};
+    std::array<std::map<uintptr_t, SpanTracker*>, NUM_CLASSES - CLS_MEDIUM> spanMap_{};
 
     // 微型spanTracker池,必须在index自旋锁内使用
     std::array<SpanTracker *, NUM_CLASSES> spanTrackerPools_;

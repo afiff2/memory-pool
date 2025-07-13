@@ -55,6 +55,15 @@ CentralCache &CentralCache::getInstance()
 
 CentralCache::CentralCache()
 {
+    for (size_t idx = 0; idx < CLS_MEDIUM; ++idx) 
+    {
+        // 预计这个 size class 下，最多 pages 条记录
+        size_t maxPages = 10*1024;
+        // 降低负载因子到 0.5（可选，越小冲突越少，但内存越多）
+        spanPageMap_[idx].max_load_factor(0.5f);
+        // 分配足够多的桶
+        spanPageMap_[idx].rehash(maxPages * 2);
+    }
 }
 
 //不用还页，上层会全部释放
@@ -63,6 +72,11 @@ CentralCache::~CentralCache() {
     std::unordered_set<SpanTracker*> uniqueTrackers;
     for (auto &pageMap : spanPageMap_) {
         for (auto &entry : pageMap) {
+            uniqueTrackers.insert(entry.second);
+        }
+    }
+    for (auto &mp : spanMap_) {
+        for (auto &entry : mp) {
             uniqueTrackers.insert(entry.second);
         }
     }
@@ -137,9 +151,17 @@ SpanTracker * CentralCache::fetchFromPageCache(size_t index)
     tr->freeAll();
     tr->next = nullptr;
 
-    for (size_t p = 0; p < pages; ++p)
-        spanPageMap_[index][static_cast<char*>(span) + p * PageCache::PAGE_SIZE] = tr;//记录每一页的SpanTracker
-
+    if(index < CLS_MEDIUM)
+    {
+        for (size_t p = 0; p < pages; ++p)
+            spanPageMap_[index][static_cast<char*>(span) + p * PageCache::PAGE_SIZE] = tr;//记录每一页的SpanTracker
+    }
+    else
+    {
+        uintptr_t base = reinterpret_cast<uintptr_t>(span);
+        spanMap_[index-CLS_MEDIUM][base] = tr;
+    }
+    
     return tr;
 }
 
@@ -197,9 +219,20 @@ void CentralCache::returnToPageCache(size_t index, SpanTracker* st)
     void *spanBase = st->spanAddr;
     size_t pages = st->numPages;
 
-    // 释放对应的哈希表
-    for (size_t p = 0; p < pages; ++p)
-        spanPageMap_[index].erase(static_cast<char *>(spanBase) + p * PageCache::PAGE_SIZE);
+    
+    if(index < CLS_MEDIUM)
+    {
+        // 释放对应的哈希表
+        for (size_t p = 0; p < pages; ++p)
+            spanPageMap_[index].erase(static_cast<char *>(spanBase) + p * PageCache::PAGE_SIZE);
+    }
+    else
+    {
+        uintptr_t base = reinterpret_cast<uintptr_t>(st->spanAddr);
+        spanMap_[index - CLS_MEDIUM].erase(base);
+    }
+
+
 
     // 释放对应的SpanTracker
     putSpanTrackerToPool(st, index);
@@ -210,14 +243,30 @@ void CentralCache::returnToPageCache(size_t index, SpanTracker* st)
 
 SpanTracker *CentralCache::getSpanTracker(void *block, size_t index)
 {
-    // 把任意地址 addr 变成它所在页的起始地址 pageBase
-    uintptr_t addr = reinterpret_cast<uintptr_t>(block);
-    uintptr_t pageMask = ~(PageCache::PAGE_SIZE - 1ULL);
-    void *pageBase = reinterpret_cast<void *>(addr & pageMask);
+    if(index < CLS_MEDIUM)
+    {
+        // 把任意地址 addr 变成它所在页的起始地址 pageBase
+        uintptr_t addr = reinterpret_cast<uintptr_t>(block);
+        uintptr_t pageMask = ~(PageCache::PAGE_SIZE - 1ULL);
+        void *pageBase = reinterpret_cast<void *>(addr & pageMask);
 
-    auto &map = spanPageMap_[index];
-    auto it = map.find(pageBase);
-    return it == map.end() ? nullptr : it->second;
+        auto &map = spanPageMap_[index];
+        auto it = map.find(pageBase);
+        return it == map.end() ? nullptr : it->second;
+    }
+    else
+    {
+        uintptr_t addr = reinterpret_cast<uintptr_t>(block);
+        auto &m = spanMap_[index-CLS_MEDIUM];
+        // upper_bound 找到第一个 key > addr
+        auto it = m.upper_bound(addr);
+        if (it == m.begin())
+            return nullptr;    // 全部 key 都 > addr，找不到
+        --it; // 现在 it->first <= addr
+
+        SpanTracker *st = it->second;
+        return st;
+    }
 }
 
 inline void CentralCache::pushFront(size_t index, SpanTracker* st) {
