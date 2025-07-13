@@ -27,6 +27,26 @@ class SpinGuard
     std::atomic_flag &flag_;
 };
 
+FetchResult SpanTracker::allocateBatch(size_t maxBatch, size_t blockSize) {
+    void* head = nullptr;
+    void** tailPtr = &head; // 始终指向上一个节点的 next 指针
+    size_t got = 0;
+    size_t toGrab = std::min(maxBatch, freeCount);
+    // 从头扫描所有块
+    for (size_t idx = 0; idx < BLOCK_COUNT && got < toGrab; ++idx) {
+        if (isFree(idx)) {
+            // 标记已分配
+            setAllocated(idx);
+            void* blk = static_cast<char*>(spanAddr) + idx * blockSize;
+            *tailPtr = blk;
+            tailPtr = reinterpret_cast<void**>(blk);
+            ++got;
+        }
+    }
+    *tailPtr = nullptr;
+    return { head, got };
+}
+
 CentralCache &CentralCache::getInstance()
 {
     static CentralCache g;
@@ -35,9 +55,6 @@ CentralCache &CentralCache::getInstance()
 
 CentralCache::CentralCache()
 {
-    auto now = std::chrono::steady_clock::now();
-    for (auto &t : lastReturn_)
-        t = now;
 }
 
 //不用还页，上层会全部释放
@@ -68,62 +85,126 @@ CentralCache::~CentralCache() {
 
 FetchResult CentralCache::fetchRange(size_t index, size_t maxBatch)
 {
-    if (index >= NUM_CLASSES) //超过上限，错误申请
+    if (index >= NUM_CLASSES || maxBatch == 0) //超过上限，错误申请
         return {nullptr, 0};
 
     SpinGuard guard{locks_[index].flag};
 
-    // 如果 free 列表空，先从页缓存拉出一整条链
-    void* list = centralFree_[index].head;
-    if (!list) {
-        auto refill = fetchFromPageCache(index);
-        if (!refill.head)
-            return {nullptr, 0};
-        list = refill.head;
+    // 确保 Free 列表非空，不空才去取
+    if (centralFree_[index] == nullptr) {
+        SpanTracker* st = fetchFromPageCache(index);
+        if (!st) return {nullptr, 0};
+        // 把新 span 挂到列表头
+        pushFront(index, st);
+        //完全空闲计数
+        ++emptySpanCount_[index]; 
     }
-    // 从 list 上 detach 最多 maxBatch 个块
-    void* cur  = list;
-    void* prev = nullptr;
-    size_t cnt = 0;
-    while (cur && cnt < maxBatch) {
-        prev = cur;
-        cur  = *reinterpret_cast<void**>(cur);
-        ++cnt;
+
+    // 从列表头取
+    SpanTracker* st = centralFree_[index];
+    bool wasEmpty = st->allFree();
+    const size_t blkSize = SizeClass::getSize(index); // 块的大小
+    auto result = st->allocateBatch(maxBatch, blkSize);
+
+    if (wasEmpty && result.count > 0) {
+        --emptySpanCount_[index]; // 完全空闲计数
     }
-    FetchResult res{ list, cnt };
 
-    // 把剩下的块存回 centralFree_
-    centralFree_[index].head = cur;
-    // 断开前面这 cnt 块
-    if (prev)
-        *reinterpret_cast<void**>(prev) = nullptr; 
+    // 如果这个 span 全分配完了，就把它从列表里摘掉
+    if (st->allAllocated()) {
+        removeFromList(centralFree_[index], st);
+    }
 
-    return res;
+    return result; // 编译器将通过 RVO 或移动语义避免拷贝
+}
+
+SpanTracker * CentralCache::fetchFromPageCache(size_t index)
+{
+    const size_t blkSize = SizeClass::getSize(index); // 需要的块的大小
+    const size_t blkNum = SpanTracker::BLOCK_COUNT;
+
+    // 计算需要的页数
+    size_t pages = (blkSize * SpanTracker::BLOCK_COUNT + PageCache::PAGE_SIZE - 1) / PageCache::PAGE_SIZE;
+
+    void *span = PageCache::getInstance().allocateSpan(pages);
+    if (!span)
+        return nullptr; // 申请失败
+
+    // 添加一个新的tracker
+    SpanTracker* tr = getSpanTrackerFromPool(index);
+    tr->spanAddr = span;
+    tr->numPages = pages;
+    tr->freeAll();
+    tr->next = nullptr;
+
+    for (size_t p = 0; p < pages; ++p)
+        spanPageMap_[index][static_cast<char*>(span) + p * PageCache::PAGE_SIZE] = tr;//记录每一页的SpanTracker
+
+    return tr;
 }
 
 //传入的块链不一定属于同一个页集
 void CentralCache::returnRange(void *start, size_t index)
 {
-    if (!start || index >= NUM_CLASSES) //错误请求
+    if (start == nullptr || index >= NUM_CLASSES) //错误请求
         return;
 
+    const size_t blkSize = SizeClass::getSize(index);
     SpinGuard guard{locks_[index].flag};
 
-    // 到最后一个块
-    void *tail = start;
-    while (*reinterpret_cast<void **>(tail))
-        tail = *reinterpret_cast<void **>(tail);
-    //插入空闲头部
-    *reinterpret_cast<void **>(tail) = centralFree_[index].head;
-    centralFree_[index].head = start;
+    void* p = start;
+    while (p != nullptr) {
+        void* next = *reinterpret_cast<void**>(p);
 
-    // 更新延迟计数
-    size_t curCnt = ++delay_[index].cnt;
-    auto now = std::chrono::steady_clock::now();
+        // 找到这个块对应的 SpanTracker
+        SpanTracker* st = getSpanTracker(p, index);
+        assert(st && "找不到对应的 SpanTracker");
 
-    // 检查是否需要执行延迟归还
-    if (shouldDelayReturn(index, curCnt, now))
-        performDelayedReturn(index);
+        // 计算这个块在 span 中的索引
+        uintptr_t offset = reinterpret_cast<uintptr_t>(p)
+                         - reinterpret_cast<uintptr_t>(st->spanAddr);
+        size_t blkIdx = offset / blkSize;
+
+        bool wasFull = st->allAllocated();
+        bool wasEmpty = st->allFree();
+
+        // 标记该块空闲
+        st->setFree(blkIdx);
+
+        //之前是满分配，重新插入队列
+        if (wasFull)
+            pushFront(index, st);
+
+        if(!wasEmpty && st->allFree()){
+            ++emptySpanCount_[index];
+            //如果有多个完全空闲的SpanTracker，就释放一个
+            if(emptySpanCount_[index]>=2)
+                returnToPageCache(index, st);
+        }
+
+        p = next;
+    }
+}
+
+void CentralCache::returnToPageCache(size_t index, SpanTracker* st)
+{
+    //减去完全空闲的计数
+    emptySpanCount_[index]--;
+
+    //从链表中摘除
+    removeFromList(centralFree_[index], st);
+
+    void *spanBase = st->spanAddr;
+    size_t pages = st->numPages;
+
+    // 释放对应的哈希表
+    for (size_t p = 0; p < pages; ++p)
+        spanPageMap_[index].erase(static_cast<char *>(spanBase) + p * PageCache::PAGE_SIZE);
+
+    // 释放对应的SpanTracker
+    putSpanTrackerToPool(st, index);
+
+    PageCache::getInstance().deallocateSpan(spanBase);
 }
 
 
@@ -139,104 +220,33 @@ SpanTracker *CentralCache::getSpanTracker(void *block, size_t index)
     return it == map.end() ? nullptr : it->second;
 }
 
-//该index太久没归还 or 接受了太多的ThreadCache的归还
-bool CentralCache::shouldDelayReturn(size_t index, size_t curCnt, std::chrono::steady_clock::time_point now) const
-{
-    return curCnt >= MAX_DELAY_COUNT || (now - lastReturn_[index]) >= DELAY_INTERVAL;
-}
-
-void CentralCache::performDelayedReturn(size_t index)
-{
-    delay_[index].cnt = 0;
-    lastReturn_[index] = std::chrono::steady_clock::now();
-
-    // 统计每一页集的空闲块数
-    std::unordered_map<SpanTracker *, size_t> counter;
-    void *blk = centralFree_[index].head;
-    while (blk)
-    {
-        if (auto *tr = getSpanTracker(blk, index))
-            ++counter[tr];
-        blk = *reinterpret_cast<void **>(blk);
+inline void CentralCache::pushFront(size_t index, SpanTracker* st) {
+    SpanTracker* oldHead = centralFree_[index];
+    st->prev = nullptr;
+    st->next = oldHead;
+    if (oldHead) {
+        oldHead->prev = st;
     }
-
-    //更新每个span的空闲计数并检查是否可以归还
-    for (auto [tr, freeCount] : counter)
-        updateSpanFreeCount(tr, freeCount, index);
+    centralFree_[index] = st;
 }
 
-void CentralCache::updateSpanFreeCount(SpanTracker *tr, size_t freeCount, size_t index)
-{
-    if (!tr)
-        return;
-    if (freeCount != tr->blockCount) //不是所有的块都空闲，暂时不归还
-        return;
+inline void CentralCache::removeFromList(SpanTracker*& head, SpanTracker* st) {
+        SpanTracker* prev = st->prev;
+        SpanTracker* next = st->next;
 
-    // 所有的块都空闲
-    void *spanBase = tr->spanAddr; //启示地址
-    size_t pages = tr->numPages; //页数
+        if (prev) {
+            prev->next = next;
+        } else {
+            // st 是头节点
+            head = next;
+        }
 
-    // 从空闲链中移除
-    void *prev = nullptr;
-    void *cur = centralFree_[index].head;
-    while (cur)
-    {
-        void *nxt = *reinterpret_cast<void **>(cur);
-        if (cur >= spanBase && cur < static_cast<char *>(spanBase) + pages * PageCache::PAGE_SIZE) // cur 这个块属于待回收的 span, 需要从链表中删除
-        {
-            if (prev)
-                *reinterpret_cast<void **>(prev) = nxt; // 把上一节点的 next 指向 nxt
-            else
-                centralFree_[index].head = nxt; // 删除头节点
+        if (next) {
+            next->prev = prev;
         }
-        else
-        {
-            prev = cur;
-        }
-        cur = nxt;
+
+        // 清理 st 自己的指针
+        st->prev = st->next = nullptr;
     }
-
-    // 释放对应的哈希表
-    for (size_t p = 0; p < pages; ++p)
-        spanPageMap_[index].erase(static_cast<char *>(spanBase) + p * PageCache::PAGE_SIZE);
-
-    // 释放对应的SpanTracker
-    putSpanTrackerToPool(tr, index);
-
-    PageCache::getInstance().deallocateSpan(spanBase);
-}
-
-FetchResult CentralCache::fetchFromPageCache(size_t index)
-{
-    const size_t blkSize = SizeClass::getSize(index); // 需要的块的大小
-
-    // 计算需要的页数
-    size_t pages = (blkSize + PageCache::PAGE_SIZE - 1) / PageCache::PAGE_SIZE;
-    if (pages < SPAN_PAGES)
-        pages = SPAN_PAGES;
-
-    void *span = PageCache::getInstance().allocateSpan(pages);
-    if (!span)
-        return {nullptr, 0}; // 申请失败
-
-    const size_t blkNum = (pages * PageCache::PAGE_SIZE) / blkSize; //拿到的块数（有内碎片）
-
-    // 切割成blocks
-    char *base = static_cast<char *>(span);
-    for (size_t i = 1; i < blkNum; ++i)
-        *reinterpret_cast<void **>(base + (i - 1) * blkSize) = base + i * blkSize;
-    *reinterpret_cast<void **>(base + (blkNum - 1) * blkSize) = nullptr;
-
-    // 添加一个新的tracker
-    SpanTracker* tr = getSpanTrackerFromPool(index);
-    tr->spanAddr = span;
-    tr->numPages = pages;
-    tr->blockCount = blkNum;
-
-    for (size_t p = 0; p < pages; ++p)
-        spanPageMap_[index][base + p * PageCache::PAGE_SIZE] = tr;//记录每一页的SpanTracker
-
-    return { base, blkNum }; // first block to caller
-}
 
 } // namespace memory_pool
