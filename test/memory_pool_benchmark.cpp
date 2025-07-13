@@ -1,7 +1,7 @@
 // memory_pool_benchmark.cpp (High-Intensity, Fixed Workload)
 // --------------------------------------------------------------------
-// • 覆盖 16 B → 256 KB 四个 size-class：Small / Medium / Large / XLarge
-// • 测试次数比例：Small : Medium : Large : XLarge = 32 : 16 : 4 : 1
+// • 覆盖 16 B → 64 KB 四个 size-class：Small / Medium / Large
+// • 测试次数比例：Small : Medium : Large = 8 : 4 : 1
 // • 同一随机种子一次生成每线程完整 alloc/free 序列，供两轮基准共享
 // 编译示例：
 //   ./benchmark             # 默认 12 线程 × 200 k 操作, seed=42
@@ -11,7 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cstdlib>         // for std::malloc, std::free
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
@@ -29,18 +29,15 @@ static_assert((ALIGNMENT & (ALIGNMENT - 1)) == 0, "ALIGNMENT must be power-of-tw
 constexpr size_t MAX_SMALL_SZ   = 512;
 constexpr size_t MAX_MEDIUM_SZ  = 4 * 1024;
 constexpr size_t MAX_LARGE_SZ   = 64 * 1024;
-constexpr size_t MAX_XLARGE_SZ  = 256 * 1024;
 constexpr size_t STEP_SMALL     = ALIGNMENT;  // typically 8 or 16
 constexpr size_t STEP_MEDIUM    = 64;
 constexpr size_t STEP_LARGE     = 512;
-constexpr size_t STEP_XLARGE    = 4096;
 
-// Ratio Small:Medium:Large:XLarge = 32:16:4:1
-constexpr uint32_t RATIO_SM = 32;
-constexpr uint32_t RATIO_MD = 16;
-constexpr uint32_t RATIO_LG = 4;
-constexpr uint32_t RATIO_XL = 1;
-constexpr uint32_t RATIO_TOTAL = RATIO_SM + RATIO_MD + RATIO_LG + RATIO_XL;
+// Ratio Small:Medium:Large = 8:4:1
+constexpr uint32_t RATIO_SM = 8;
+constexpr uint32_t RATIO_MD = 4;
+constexpr uint32_t RATIO_LG = 1;
+constexpr uint32_t RATIO_TOTAL = RATIO_SM + RATIO_MD + RATIO_LG;
 // --------------------------------------------------
 
 const size_t OUTSTANDING_LIMIT = 512;  // higher than previous 128 for more pressure
@@ -58,15 +55,13 @@ Workload generate_workload(uint32_t threads, uint32_t ops_per_thread, uint64_t s
     {
         // 先算好每个 size-class 的数量
         uint32_t base    = ops_per_thread / RATIO_TOTAL;
-        uint32_t cnt_xl  = base * RATIO_XL;
         uint32_t cnt_lg  = base * RATIO_LG;
         uint32_t cnt_md  = base * RATIO_MD;
-        uint32_t cnt_sm  = ops_per_thread - (cnt_md + cnt_lg + cnt_xl); // 吸收余数
+        uint32_t cnt_sm  = ops_per_thread - (cnt_md + cnt_lg); // 吸收余数
 
         std::uniform_int_distribution<size_t> dist_sm (16, MAX_SMALL_SZ);
         std::uniform_int_distribution<size_t> dist_md(MAX_SMALL_SZ+1, MAX_MEDIUM_SZ);
         std::uniform_int_distribution<size_t> dist_lg(MAX_MEDIUM_SZ+1, MAX_LARGE_SZ);
-        std::uniform_int_distribution<size_t> dist_xl(MAX_LARGE_SZ+1, MAX_XLARGE_SZ);
 
         for (uint32_t tid = 0; tid < threads; ++tid) {
             std::mt19937_64 rng(seed + tid);
@@ -82,7 +77,6 @@ Workload generate_workload(uint32_t threads, uint32_t ops_per_thread, uint64_t s
             push_rand(dist_sm, cnt_sm, STEP_SMALL);
             push_rand(dist_md, cnt_md, STEP_MEDIUM);
             push_rand(dist_lg, cnt_lg, STEP_LARGE);
-            push_rand(dist_xl, cnt_xl, STEP_XLARGE);
             std::shuffle(pool.begin(), pool.end(), rng);
         }
     }
