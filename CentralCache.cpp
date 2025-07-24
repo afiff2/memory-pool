@@ -1,5 +1,4 @@
 #include "CentralCache.h"
-#include "PageCache.h"
 
 #include <cassert>
 #include <cstdint>
@@ -98,16 +97,6 @@ CentralCache::~CentralCache() {
     for (auto *tr : uniqueTrackers) {
         delete tr;
     }
-
-    //清理池子
-    for (size_t i = 0; i < NUM_CLASSES; ++i) {
-        SpanTracker* cur = central_[i].poolHead;
-        while (cur) {
-            SpanTracker* next = cur->next;
-            delete cur;
-            cur = next;
-        }
-    }
 }
 
 FetchResult CentralCache::fetchRange(size_t index, size_t maxBatch)
@@ -158,7 +147,7 @@ SpanTracker * CentralCache::fetchFromPageCache(size_t index)
         return nullptr; // 申请失败
 
     // 添加一个新的tracker
-    SpanTracker* tr = getSpanTrackerFromPool(index);
+    SpanTracker* tr = SpanTrackerPool::get(index);
     tr->spanAddr = span;
     tr->numPages = pages;
     tr->freeAll();
@@ -255,7 +244,7 @@ void CentralCache::returnToPageCache(size_t index, SpanTracker* st)
 
 
     // 释放对应的SpanTracker
-    putSpanTrackerToPool(st, index);
+    SpanTrackerPool::put(st, index);
 
     PageCache::getInstance().deallocateSpan(spanBase);
 }
