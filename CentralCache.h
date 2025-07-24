@@ -103,8 +103,8 @@ class CentralCache
     inline void removeFromList(SpanTracker *&head, SpanTracker *st);
 
   private:
-    // 单个 index 最多保留 64 MB
-    static constexpr size_t kMaxBytesPerIndex = 64 * 1024 * 1024; // 64 MB
+    // 单个 index 最多保留 128 MB
+    static constexpr size_t kMaxBytesPerIndex = 128 * 1024 * 1024; // 128 MB
 
     struct alignas(64) CentralClass
     {
