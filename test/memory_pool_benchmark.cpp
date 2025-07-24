@@ -155,6 +155,7 @@ BenchmarkResult run_benchmark(const std::string& title,
     std::vector<std::thread> workers;
     std::vector<ThreadStats> stats(threads);
 
+    std::cout << "--- 开始单元测试: " << r.title << " ---\n";
     auto t_begin = Clock::now();
     for (uint32_t tid = 0; tid < threads; ++tid) {
         workers.emplace_back([&, tid]() {
@@ -201,7 +202,7 @@ BenchmarkResult run_benchmark(const std::string& title,
                     }
                 }
             }
-            // 结束时释放尚未 free 的块（不计时、不统计）
+            // 结束时释放尚未 free 的块（不统计）
             for (auto& blk : blocks) {
                 freeFn(blk.first, blk.second);
                 g_curr_bytes.fetch_sub(blk.second);
@@ -210,6 +211,7 @@ BenchmarkResult run_benchmark(const std::string& title,
     }
     for (auto& th : workers) th.join();
     auto t_end = Clock::now();
+    std::cout << "--- 结束单元测试: " << r.title << " ---\n";
 
     r.total_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_begin).count();
 

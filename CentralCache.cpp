@@ -92,11 +92,6 @@ CentralCache::~CentralCache() {
             uniqueTrackers.insert(entry.second);
         }
     }
-
-    // 删除所有 SpanTracker
-    for (auto *tr : uniqueTrackers) {
-        delete tr;
-    }
 }
 
 FetchResult CentralCache::fetchRange(size_t index, size_t maxBatch)
