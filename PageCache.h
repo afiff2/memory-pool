@@ -2,10 +2,10 @@
 #include <cstddef>
 #include <map>
 #include <mutex>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
-#include <sys/mman.h>
 
 // ToDo: 回收回 OS（munmap）
 // 每次拆分都 new Span，每次合并都 delete Span，在高并发场景下可能成为瓶颈。
@@ -42,78 +42,77 @@ class PageCache
     class SpanPool
     {
       private:
-        static constexpr std::size_t SPAN_PAGE_COUNT = 1;
-        static constexpr std::size_t SPAN_POOL_SIZE = SPAN_PAGE_COUNT * PAGE_SIZE;
-
-        // 用于链接空闲Span的联合体
-        union SpanStorage
-        {
-            alignas(Span) char data[sizeof(Span)];
-            SpanStorage *next; // 空闲时用作链表指针
-        };
-
+        // 每个页的头部元信息，紧接着放 Span 对象数组
         struct SpanPage
         {
-            SpanStorage blocks[(SPAN_POOL_SIZE - sizeof(SpanPage*)) / sizeof(SpanStorage)];
-            SpanPage *next;
+            SpanPage *next; // 链到下一个 page
+            // Span 对象紧跟在这里开始
         };
-
         static inline SpanPage *pageList_ = nullptr;
-        static inline SpanStorage *freeList_ = nullptr;
+        static inline Span *freeList_ = nullptr;
 
+        // 一个页最多能放多少个 Span
+        static constexpr size_t HeaderSize = 64;
+        static_assert(HeaderSize >= sizeof(SpanPage), "HeaderSize must cover SpanPage metadata");
+        static_assert(PageCache::PAGE_SIZE > HeaderSize + sizeof(Span), "Page too small to hold any Span");
+
+        // 从 PageCache 申请一页并拆成若干 Span
         static void allocateNewPage()
         {
-            void *mem = mmap(nullptr, SPAN_POOL_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            if (mem == MAP_FAILED)
-            {
+            void *raw =
+                ::mmap(nullptr, PageCache::PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (raw == MAP_FAILED)
                 throw std::bad_alloc();
-            }
 
-            SpanPage *newPage = static_cast<SpanPage *>(mem);
-            newPage->next = pageList_;
-            pageList_ = newPage;
+            auto *page = static_cast<SpanPage *>(raw);
+            page->next = pageList_;
+            pageList_ = page;
 
-            // 将新页中的所有SpanStorage链接到空闲链表
-            for (std::size_t i = 0; i < sizeof(newPage->blocks) / sizeof(newPage->blocks[0]); ++i)
+            char *base = reinterpret_cast<char *>(page) + HeaderSize;
+            size_t count = (PageCache::PAGE_SIZE - HeaderSize) / sizeof(Span);
+            for (size_t i = 0; i < count; ++i)
             {
-                newPage->blocks[i].next = freeList_;
-                freeList_ = &newPage->blocks[i];
+                auto *slot = reinterpret_cast<Span *>(base + i * sizeof(Span));
+                slot->next = freeList_;
+                freeList_ = slot;
             }
         }
 
       public:
+        // 取一个 Span（若空则先新开一页）
         static Span *get()
         {
             if (!freeList_)
             {
                 allocateNewPage();
             }
-
-            SpanStorage *storage = freeList_;
+            Span *s = freeList_;
             freeList_ = freeList_->next;
-
-            return reinterpret_cast<Span*>(storage);
+            // placement-new Span 的内部成员（必要时）
+            s->prev = s->next = nullptr;
+            return s;
         }
 
+        // 归还一个 Span 到池里
         static void put(Span *s)
         {
             if (!s)
                 return;
-
-            SpanStorage *storage = reinterpret_cast<SpanStorage *>(s);
-            storage->next = freeList_;
-            freeList_ = storage;
+            // 如果需要析构，调用 ~Span()
+            s->next = freeList_;
+            freeList_ = s;
         }
 
-        // PageCache析构时使用
+        // 在 PageCache 析构时清理所有页面
         static void clear()
         {
-            SpanPage *current = pageList_;
-            while (current)
+            // 释放所有 mmap 的页
+            SpanPage *p = pageList_;
+            while (p)
             {
-                SpanPage *next = current->next;
-                munmap(current, SPAN_POOL_SIZE);
-                current = next;
+                SpanPage *nxt = p->next;
+                ::munmap(p, PageCache::PAGE_SIZE);
+                p = nxt;
             }
             pageList_ = nullptr;
             freeList_ = nullptr;
