@@ -1,4 +1,5 @@
 #include "PageCache.h"
+#include <cstdlib>
 
 namespace memory_pool
 {
@@ -68,6 +69,9 @@ void *PageCache::allocateSpan(std::size_t numPages)
     void *mem = systemAlloc(numPages);
     if (!mem)
         return nullptr;
+    
+    // 记录申请量
+    totalAllocatedBytes_ += numPages * PAGE_SIZE;
 
     Span* span = SpanPool::get();
     span->pageAddr = mem;
@@ -127,7 +131,30 @@ void PageCache::deallocateSpan(void *ptr)
         }
     }
 
-    // 插回空闲链表
+    // 检查是否需要直接回 OS
+    const std::size_t spanBytes = span->numPages * PAGE_SIZE;
+    constexpr std::size_t thresholdBytes = 10ULL * 1024 * 1024 * 1024; // 10 GB
+    constexpr std::size_t largeSpanBytes = 4ULL * 1024 * 1024;          // 4 MB
+    if (totalAllocatedBytes_ > thresholdBytes && spanBytes > largeSpanBytes)
+    {
+        // 10% 概率直接回收
+        if ((std::rand() % 100) < 10)
+        {
+            // 从映射表中移除
+            spanStartMap_.erase(span->pageAddr);
+            spanEndMap_.erase(endAddr(span));
+
+            // 更新已申请总量
+            totalAllocatedBytes_ -= spanBytes;
+            // 真正回 OS
+            ::munmap(span->pageAddr, spanBytes);
+            // 回收 span 元数据
+            SpanPool::put(span);
+            return;
+        }
+    }
+
+    // 否则，放回空闲链表
     pushToFreeList(span);
 }
 

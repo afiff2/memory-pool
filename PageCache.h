@@ -120,7 +120,7 @@ class PageCache
     };
 
     void *systemAlloc(std::size_t numPages);
-    void *endAddr(const Span *s) const
+    inline void *endAddr(const Span *s) const
     { // span 尾后一字节
         return static_cast<char *>(s->pageAddr) + s->numPages * PAGE_SIZE;
     }
@@ -131,6 +131,7 @@ class PageCache
     std::unordered_map<void *, Span *> spanStartMap_; // 起始地址 → Span*
     std::unordered_map<void *, Span *> spanEndMap_;   // 结束地址 → Span*
     std::mutex mutex_;
+    std::size_t totalAllocatedBytes_{0}; // 跟踪当前从 OS 拿到但尚未回收的总字节数
 };
 
 } // namespace memory_pool

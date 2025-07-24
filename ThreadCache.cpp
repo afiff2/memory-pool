@@ -66,9 +66,9 @@ void ThreadCache::deallocate(void *ptr, size_t size)
 // 判断是否需要将内存回收给中心缓存
 bool ThreadCache::shouldReturnToCentralCache(size_t index) {
     size_t blockSize = SizeClass::getSize(index);
-    constexpr size_t kMaxBytesPerIndex = 256 * 1024;  // 256 KB 上限
+    constexpr size_t kMaxBytesPerIndex = 1 * 1024 * 1024;  // 1MB 上限
 
-    // 如果本地空闲链表总字节数超过 256 KB，就返还给 CentralCache
+    // 如果本地空闲链表总字节数超过 1MB，就返还给 CentralCache
     return freeListSize_[index] * blockSize > kMaxBytesPerIndex;
 }
 
@@ -79,16 +79,16 @@ void *ThreadCache::fetchFromCentralCache(size_t index)
     // 根据大小选不同的批量抓取数
     size_t batchNum;
     if (blockSize <= MAX_SMALL_SZ) {
-        batchNum = 64;      // ≤512B：一次取 64 块
+        batchNum = 512;      // ≤512B
     }
     else if (blockSize <= MAX_MEDIUM_SZ) {
-        batchNum = 32;      // 513B–4KB：一次取 32 块
+        batchNum = 256;      // 513B–4KB
     }
     else if (blockSize <= MAX_LARGE_SZ) {
-        batchNum = 16;      // 4KB–64KB：一次取 16 块
+        batchNum = 128;      // 4KB–64KB
     }
     else {
-        batchNum = 4;       // >64KB：一次取 4 块
+        batchNum = 64;       // >64KB
     }
 
     // 从中心缓存批量获取内存

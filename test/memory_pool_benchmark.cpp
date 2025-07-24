@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <numeric>
 #include <random>
 #include <string>
 #include <thread>
@@ -18,7 +19,7 @@ static_assert((ALIGNMENT & (ALIGNMENT - 1)) == 0, "ALIGNMENT must be power-of-tw
 constexpr size_t MAX_SMALL_SZ   = 512;
 constexpr size_t MAX_MEDIUM_SZ  = 4 * 1024;
 constexpr size_t MAX_LARGE_SZ   = 64 * 1024;
-constexpr size_t STEP_SMALL     = ALIGNMENT;  // typically 8 or 16
+constexpr size_t STEP_SMALL     = ALIGNMENT;
 constexpr size_t STEP_MEDIUM    = 64;
 constexpr size_t STEP_LARGE     = 512;
 
@@ -29,6 +30,9 @@ constexpr uint32_t RATIO_LG = 1;
 
 // Max outstanding allocations per thread
 constexpr size_t OUTSTANDING_LIMIT = 512;
+
+// Reservoir sampling size per thread (for p99 approximation)
+constexpr size_t RESERVOIR_SIZE = 100000;
 
 // Global memory counters
 static std::atomic<uint64_t> g_curr_bytes{0}, g_peak_bytes{0};
@@ -53,7 +57,10 @@ struct ThreadStats {
     uint64_t attempted = 0;
     uint64_t alloc_success = 0, alloc_fail = 0;
     uint64_t free_success = 0, free_fail = 0;
-    std::vector<double> alloc_lat, free_lat;
+    double sum_alloc_us = 0, sum_free_us = 0;
+    uint64_t count_alloc = 0, count_free = 0;
+    double sample_alloc[RESERVOIR_SIZE];
+    double sample_free[RESERVOIR_SIZE];
 };
 
 using Clock = std::chrono::high_resolution_clock;
@@ -72,110 +79,139 @@ BenchmarkResult run_benchmark_inline(const std::string& title,
     std::vector<std::thread> workers;
     std::vector<ThreadStats> stats(threads);
 
-    std::cout << "--- 开始单元测试: " << r.title << " ---\n";
     auto t_begin = Clock::now();
     for (uint32_t tid = 0; tid < threads; ++tid) {
         workers.emplace_back([&, tid]() {
             ThreadStats& s = stats[tid];
-            s.alloc_lat.reserve(ops_per_thread / 2);
-            s.free_lat .reserve(ops_per_thread / 2);
-
             std::mt19937_64 rng(seed + tid);
             std::discrete_distribution<int> class_dist{RATIO_SM, RATIO_MD, RATIO_LG};
-            std::uniform_int_distribution<size_t> dist_sm (16, MAX_SMALL_SZ);
+            std::uniform_int_distribution<size_t> dist_sm(16, MAX_SMALL_SZ);
             std::uniform_int_distribution<size_t> dist_md(MAX_SMALL_SZ + 1, MAX_MEDIUM_SZ);
             std::uniform_int_distribution<size_t> dist_lg(MAX_MEDIUM_SZ + 1, MAX_LARGE_SZ);
             std::mt19937_64 coin(seed + tid ^ 0x9e3779b97f4a7c15ULL);
 
-            std::vector<std::pair<void*, size_t>> blocks;
-            blocks.reserve(OUTSTANDING_LIMIT);
+            std::pair<void*, size_t> blocks[OUTSTANDING_LIMIT];
+            size_t blocks_size = 0;
             size_t outstanding = 0;
 
             for (uint32_t i = 0; i < ops_per_thread; ++i) {
                 bool do_alloc;
-                if      (outstanding == 0)            do_alloc = true;
-                else if (outstanding >= OUTSTANDING_LIMIT) do_alloc = false;
-                else                                  do_alloc = (coin() & 1);
+                if      (outstanding == 0)
+                    do_alloc = true;
+                else if (outstanding >= OUTSTANDING_LIMIT)
+                    do_alloc = false;
+                else
+                    do_alloc = (coin() & 1);
 
-                ++s.attempted;
+                s.attempted++;
                 if (do_alloc) {
                     int cls = class_dist(rng);
-                    size_t raw = (cls == 0 ? dist_sm(rng)
-                                      : cls == 1 ? dist_md(rng)
-                                                 : dist_lg(rng));
-                    size_t step = (cls == 0 ? STEP_SMALL
-                                      : cls == 1 ? STEP_MEDIUM
-                                                 : STEP_LARGE);
+                    size_t raw = cls == 0 ? dist_sm(rng)
+                                  : cls == 1 ? dist_md(rng)
+                                             : dist_lg(rng);
+                    size_t step = cls == 0 ? STEP_SMALL
+                                   : cls == 1 ? STEP_MEDIUM
+                                              : STEP_LARGE;
                     size_t sz = (raw + step - 1) & ~(step - 1);
 
                     auto t0 = Clock::now();
                     void* p = allocFn(sz);
                     auto t1 = Clock::now();
-                    s.alloc_lat.push_back(
-                        std::chrono::duration<double, std::micro>(t1 - t0).count());
+                    double us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+
+                    s.sum_alloc_us += us;
+                    s.count_alloc++;
+                    if (s.count_alloc <= RESERVOIR_SIZE) {
+                        s.sample_alloc[s.count_alloc - 1] = us;
+                    } else {
+                        uint64_t j = rng() % s.count_alloc;
+                        if (j < RESERVOIR_SIZE) s.sample_alloc[j] = us;
+                    }
 
                     if (p) {
-                        ++s.alloc_success;
-                        blocks.emplace_back(p, sz);
+                        s.alloc_success++;
+                        if (blocks_size < OUTSTANDING_LIMIT) {
+                            blocks[blocks_size++] = {p, sz};
+                        }
                         uint64_t nb = g_curr_bytes.fetch_add(sz) + sz;
                         uint64_t prev;
                         while (nb > (prev = g_peak_bytes.load()) &&
                                !g_peak_bytes.compare_exchange_weak(prev, nb));
-                        ++outstanding;
+                        outstanding++;
                     } else {
-                        ++s.alloc_fail;
+                        s.alloc_fail++;
                     }
                 } else {
-                    if (blocks.empty()) {
-                        ++s.free_fail;
+                    if (blocks_size == 0) {
+                        s.free_fail++;
                     } else {
-                        auto [ptr, sz] = blocks.back();
-                        blocks.pop_back();
-                        auto t0 = Clock::now();
+                        void* ptr = blocks[--blocks_size].first;
+                        size_t sz = blocks[blocks_size].second;
+                        auto t0  = Clock::now();
                         freeFn(ptr, sz);
-                        auto t1 = Clock::now();
-                        s.free_lat.push_back(
-                            std::chrono::duration<double, std::micro>(t1 - t0).count());
-                        ++s.free_success;
+                        auto t1  = Clock::now();
+                        double us = std::chrono::duration<double, std::micro>(t1 - t0).count();
+
+                        s.sum_free_us += us;
+                        s.count_free++;
+                        if (s.count_free <= RESERVOIR_SIZE) {
+                            s.sample_free[s.count_free - 1] = us;
+                        } else {
+                            uint64_t j = rng() % s.count_free;
+                            if (j < RESERVOIR_SIZE) s.sample_free[j] = us;
+                        }
+
+                        s.free_success++;
                         g_curr_bytes.fetch_sub(sz);
-                        --outstanding;
+                        outstanding--;
                     }
                 }
             }
-            // 回收剩余块
-            for (auto& blk : blocks) {
-                freeFn(blk.first, blk.second);
-                g_curr_bytes.fetch_sub(blk.second);
+            for (size_t i = 0; i < blocks_size; ++i) {
+                freeFn(blocks[i].first, blocks[i].second);
+                g_curr_bytes.fetch_sub(blocks[i].second);
             }
         });
     }
     for (auto& th : workers) th.join();
     auto t_end = Clock::now();
-    std::cout << "--- 结束单元测试: " << r.title << " ---\n";
 
     r.total_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_begin).count();
 
-    // 汇总
-    std::vector<double> all_alloc, all_free;
+    // 聚合结果
+    std::vector<double> all_alloc_samples;
+    std::vector<double> all_free_samples;
+    uint64_t total_alloc_count = 0, total_free_count = 0;
+    double total_alloc_sum = 0, total_free_sum = 0;
+
     for (auto& s : stats) {
-        r.attempted_ops += s.attempted;
-        r.alloc_success += s.alloc_success;
-        r.alloc_fail    += s.alloc_fail;
-        r.free_success  += s.free_success;
-        r.free_fail     += s.free_fail;
-        all_alloc.insert(all_alloc.end(), s.alloc_lat.begin(), s.alloc_lat.end());
-        all_free .insert(all_free .end(), s.free_lat.begin(), s.free_lat.end());
+        r.attempted_ops   += s.attempted;
+        r.alloc_success   += s.alloc_success;
+        r.alloc_fail      += s.alloc_fail;
+        r.free_success    += s.free_success;
+        r.free_fail       += s.free_fail;
+        total_alloc_sum   += s.sum_alloc_us;
+        total_alloc_count += s.count_alloc;
+        total_free_sum    += s.sum_free_us;
+        total_free_count  += s.count_free;
+
+        size_t na = std::min<uint64_t>(s.count_alloc, RESERVOIR_SIZE);
+        for (size_t i = 0; i < na; ++i) all_alloc_samples.push_back(s.sample_alloc[i]);
+        size_t nf = std::min<uint64_t>(s.count_free, RESERVOIR_SIZE);
+        for (size_t i = 0; i < nf; ++i) all_free_samples.push_back(s.sample_free[i]);
     }
 
-    auto calc = [](std::vector<double>& v, double& avg, double& p99) {
-        if (v.empty()) { avg = p99 = 0; return; }
-        avg = std::accumulate(v.begin(), v.end(), 0.0) / v.size();
+    r.avg_alloc_us = total_alloc_count ? (total_alloc_sum / total_alloc_count) : 0;
+    r.avg_free_us  = total_free_count  ? (total_free_sum  / total_free_count)  : 0;
+
+    auto compute_p99 = [](std::vector<double>& v) {
+        if (v.empty()) return 0.0;
         size_t idx = static_cast<size_t>(v.size() * 0.99);
         std::nth_element(v.begin(), v.begin() + idx, v.end());
-        p99 = v[idx];
+        return v[idx];
     };
-    calc(all_alloc, r.avg_alloc_us, r.p99_alloc_us);
-    calc(all_free , r.avg_free_us , r.p99_free_us );
+    r.p99_alloc_us = compute_p99(all_alloc_samples);
+    r.p99_free_us  = compute_p99(all_free_samples);
 
     return r;
 }
@@ -199,10 +235,29 @@ void print_result(const BenchmarkResult& r) {
               << "---------------------------\n\n";
 }
 
+void print_comparison(const BenchmarkResult& a, const BenchmarkResult& b) {
+    auto fmt_f = [](double  v){ std::ostringstream os; os<<std::fixed<<std::setprecision(2)<<v;return os.str(); };
+    auto opsps = [](const BenchmarkResult& r){ return r.attempted_ops / (r.total_time_ms / 1000.0); };
+    constexpr int w1 = 34, w2 = 20;
+
+    std::cout << "--- 对比: " << a.title << " vs " << b.title << " ---\n";
+    std::cout << std::left << std::setw(w1) << "指标"    << "| " << std::setw(w2) << a.title << "| " << std::setw(w2) << b.title << "|\n";
+    std::cout << std::string(w1 + 2 + w2 + 2 + w2 + 1, '-') << "\n";
+    auto line = [&](const char* name, const std::string& va, const std::string& vb) {
+        std::cout << std::left << std::setw(w1) << name << "| " << std::setw(w2) << va << "| " << std::setw(w2) << vb << "|\n";
+    };
+    line("Ops/Sec (越高越好)", fmt_f(opsps(a)), fmt_f(opsps(b)));
+    line("Avg alloc (us)",      fmt_f(a.avg_alloc_us), fmt_f(b.avg_alloc_us));
+    line("P99 alloc (us)",      fmt_f(a.p99_alloc_us), fmt_f(b.p99_alloc_us));
+    line("Avg free  (us)",      fmt_f(a.avg_free_us),   fmt_f(b.avg_free_us));
+    line("P99 free  (us)",      fmt_f(a.p99_free_us),   fmt_f(b.p99_free_us));
+    std::cout << std::string(w1 + 2 + w2 + 2 + w2 + 1, '-') << "\n\n";
+}
+
 int main(int argc, char* argv[]) {
-    uint32_t threads    = argc > 1 ? std::stoul(argv[1]) : 12;
-    uint32_t ops        = argc > 2 ? std::stoul(argv[2]) : 200000;
-    uint64_t seed       = argc > 3 ? std::stoull(argv[3]) : 42ULL;
+    uint32_t threads  = argc > 1 ? std::stoul(argv[1]) : 12;
+    uint32_t ops      = argc > 2 ? std::stoul(argv[2]) : 200000;
+    uint64_t seed     = argc > 3 ? std::stoull(argv[3]) : 42ULL;
 
     auto res_pool = run_benchmark_inline("自定义内存池",
                                          [](size_t sz){ return memory_pool::MemoryPool::allocate(sz); },
@@ -216,5 +271,6 @@ int main(int argc, char* argv[]) {
                                            threads, ops, seed);
     print_result(res_malloc);
 
+    print_comparison(res_pool, res_malloc);
     return 0;
 }
